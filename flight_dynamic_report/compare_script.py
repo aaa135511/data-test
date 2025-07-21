@@ -1,134 +1,155 @@
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 
-# --- 配置 ---
-FPLA_EXCEL_FILE = 'fpla_message-20250708.xlsx'
-TELEGRAM_EXCEL_FILE = 'telegram_comparison_ready_data.xlsx'
-TARGET_EXEC_DATE = '2025-07-08'
-OUTPUT_COMPARISON_RESULT_FILE = f'comparison_result_v7.0_correct_{TARGET_EXEC_DATE.replace("-", "")}.xlsx'
-
-# --- 匹配规则引擎 (v2.0 - 保持不变) ---
-MATCHING_RULES = {
-    'DLA': ['DLA', 'SLOTCHG'],
-    'CHG': ['UPD', 'SLOTCHG', 'CNLPART'],
-    'CNL': ['CNL'],
-    'FPL': ['ADD'],
-}
-CPL_MATCHING_RULES = {
-    'ALTERNATE': ['ALN', 'ALNADD'],
-    'RETURN': ['RTN', 'RTNADD']
-}
+# --- 配置区 ---
+TARGET_DATE_STR = "2025-07-08"
+AFTN_PROCESSED_FILE = f'processed_aftn_dynamic_{TARGET_DATE_STR}.csv'
+FPLA_PROCESSED_FILE = f'processed_fpla_plan_{TARGET_DATE_STR}.csv'
+FINAL_COMPARISON_REPORT_FILE = f'final_comparison_report_{TARGET_DATE_STR}.csv'
 
 
-# --- 主对比函数 ---
-def correct_match_logic(fpla_file, telegram_file, target_date):
+def get_aftn_final_summary(df_aftn):
     """
-    主对比程序：采用最终正确逻辑，在匹配前彻底过滤掉DEP和ARR报文。
+    【最终版核心函数】：创建“AFTN最终动态综合体”，集成“信息前向填充”
     """
-    print("--- [步骤 0] 开始加载和预处理数据 ---")
+    if df_aftn.empty:
+        return pd.DataFrame()
+
+    print("开始生成AFTN最终动态综合体 (含信息前向填充)...")
+
+    # 确保ReceiveTime是datetime类型，方便排序
+    df_aftn['ReceiveTime'] = pd.to_datetime(df_aftn['ReceiveTime'])
+
+    # --- 【关键升级】: 信息前向填充 ---
+    # 1. 首先对整个DataFrame按航班和时间排序
+    df_aftn_sorted = df_aftn.sort_values(by=['FlightKey', 'ReceiveTime'])
+
+    # 2. 定义需要继承的关键信息列
+    fill_cols = ['RegNo', 'CraftType', 'FlightNo', 'DepAirport', 'ArrAirport']
+
+    # 3. 按FlightKey分组，并对指定列进行前向填充
+    # 这会将一个航班前一条消息的有效信息，填充到后一条消息的空值中
+    df_aftn_sorted[fill_cols] = df_aftn_sorted.groupby('FlightKey')[fill_cols].fillna(method='ffill')
+    # ------------------------------------
+
+    final_summaries = []
+    # 使用填充和排序后的DataFrame进行后续处理
+    for flight_key, group in df_aftn_sorted.groupby('FlightKey'):
+        # 查找最新的DEP和ARR报文 (现在这些报文已经包含了继承来的信息)
+        latest_dep = group[group['MessageType'] == 'DEP'].nlargest(1, 'ReceiveTime')
+        latest_arr = group[group['MessageType'] == 'ARR'].nlargest(1, 'ReceiveTime')
+
+        summary_record = {}
+
+        if not latest_dep.empty and not latest_arr.empty:
+            # --- 情况一：DEP和ARR都存在，进行合并 ---
+            dep_row = latest_dep.iloc[0]
+            arr_row = latest_arr.iloc[0]
+            summary_record['FlightKey'] = flight_key
+            summary_record['ReceiveTime'] = max(dep_row['ReceiveTime'], arr_row['ReceiveTime'])
+            summary_record['MessageType'] = 'DEP_ARR_MERGED'
+            summary_record['FlightNo'] = dep_row['FlightNo']
+            summary_record['DepAirport'] = dep_row['DepAirport']
+            summary_record['ArrAirport'] = dep_row['ArrAirport']
+            # 注意：ARR报文的RegNo和CraftType可能为空，但现在已经被dep_row或更早的报文填充了
+            summary_record['RegNo'] = arr_row['RegNo']  # 取最终状态ARR时的RegNo
+            summary_record['CraftType'] = arr_row['CraftType']
+            summary_record['SOBT_EOBT_ATOT'] = dep_row['SOBT_EOBT_ATOT']
+            summary_record['SIBT_EIBT_AIBT'] = arr_row['SIBT_EIBT_AIBT']
+        else:
+            # --- 情况二：不满足合并条件，直接取最后一条记录 ---
+            # 这条最后记录现在也已经包含了所有前序的有效信息
+            latest_record = group.nlargest(1, 'ReceiveTime')
+            if not latest_record.empty:
+                summary_record = latest_record.iloc[0].to_dict()
+
+        if summary_record:
+            final_summaries.append(summary_record)
+
+    print(f"AFTN最终动态综合体生成完毕，共 {len(final_summaries)} 条记录。")
+    return pd.DataFrame(final_summaries)
+
+
+# 其他函数保持不变
+def get_fpla_final_summary(df_fpla):
+    if df_fpla.empty: return pd.DataFrame()
+    print("开始提取FPLA最新动态...")
+    df_fpla['ReceiveTime'] = pd.to_datetime(df_fpla['ReceiveTime'])
+    return df_fpla.sort_values('ReceiveTime').drop_duplicates('FlightKey', keep='last')
+
+
+def compare_final_states(df_aftn_final, df_fpla_final):
+    print("开始进行最终动态对比分析...")
+    comparison_df = pd.merge(df_fpla_final, df_aftn_final, on='FlightKey', how='outer', suffixes=('_FPLA', '_AFTN'))
+    results = []
+    for index, row in comparison_df.iterrows():
+        result_row = {'FlightKey': row['FlightKey']}
+        fpla_exists = pd.notna(row.get('ReceiveTime_FPLA'))
+        aftn_exists = pd.notna(row.get('ReceiveTime_AFTN'))
+        if fpla_exists and not aftn_exists:
+            result_row['ComparisonResult'] = 'FPLA_ONLY'
+        elif not fpla_exists and aftn_exists:
+            result_row['ComparisonResult'] = 'AFTN_ONLY'
+        elif fpla_exists and aftn_exists:
+            result_row['ComparisonResult'] = 'MATCHED'
+        else:
+            continue
+        if result_row['ComparisonResult'] == 'MATCHED':
+            time_diff = (row['ReceiveTime_AFTN'] - row['ReceiveTime_FPLA']).total_seconds()
+            result_row['Timeliness_FPLA_Lead_Seconds'] = time_diff
+        mismatched_fields = []
+        if result_row['ComparisonResult'] == 'MATCHED':
+            if str(row.get('RegNo_FPLA', '')) != str(row.get('RegNo_AFTN', '')):
+                mismatched_fields.append(
+                    f"RegNo(FPLA:{row.get('RegNo_FPLA', 'N/A')}, AFTN:{row.get('RegNo_AFTN', 'N/A')})")
+            if str(row.get('CraftType_FPLA', '')) != str(row.get('CraftType_AFTN', '')):
+                mismatched_fields.append(
+                    f"CraftType(FPLA:{row.get('CraftType_FPLA', 'N/A')}, AFTN:{row.get('CraftType_AFTN', 'N/A')})")
+        result_row['Accuracy_Mismatch'] = "; ".join(mismatched_fields) if mismatched_fields else None
+        result_row['FPLA_MessageType'] = row.get('MessageType_FPLA')
+        result_row['FPLA_ReceiveTime'] = row.get('ReceiveTime_FPLA')
+        result_row['FPLA_RegNo'] = row.get('RegNo_FPLA')
+        result_row['FPLA_CraftType'] = row.get('CraftType_FPLA')
+        result_row['FPLA_SOBT'] = row.get('SOBT_EOBT_ATOT_FPLA')
+        result_row['FPLA_SIBT'] = row.get('SIBT_EIBT_AIBT_FPLA')
+        result_row['AFTN_MessageType'] = row.get('MessageType_AFTN')
+        result_row['AFTN_ReceiveTime'] = row.get('ReceiveTime_AFTN')
+        result_row['AFTN_RegNo'] = row.get('RegNo_AFTN')
+        result_row['AFTN_CraftType'] = row.get('CraftType_AFTN')
+        result_row['AFTN_ATOT'] = row.get('SOBT_EOBT_ATOT_AFTN')
+        result_row['AFTN_AIBT'] = row.get('SIBT_EIBT_AIBT_AFTN')
+        results.append(result_row)
+    print("对比分析完成！")
+    return pd.DataFrame(results)
+
+
+# --- 主程序入口 ---
+if __name__ == "__main__":
     try:
-        fpla_df = pd.read_excel(fpla_file, dtype=str)
-        fpla_df['UPDATETIME'] = pd.to_datetime(fpla_df['UPDATETIME'], errors='coerce')
-        fpla_df = fpla_df.dropna(subset=['UPDATETIME', 'CALLSIGN', 'DEPAP', 'SOBT'])
-        fpla_df['CALLSIGN'] = fpla_df['CALLSIGN'].str.strip()
-        fpla_df['FPLA_ExecDate'] = pd.to_datetime(fpla_df['SOBT'].str.slice(0, 8), format='%Y%m%d',
-                                                  errors='coerce').dt.strftime('%Y-%m-%d')
-        fpla_df_target = fpla_df[fpla_df['FPLA_ExecDate'] == target_date].copy()
-        print(f"[LOG] FPLA文件加载成功，筛选出 {len(fpla_df_target)} 条目标日期的记录。")
+        df_aftn = pd.read_csv(AFTN_PROCESSED_FILE)
+        df_fpla = pd.read_csv(FPLA_PROCESSED_FILE)
+    except FileNotFoundError as e:
+        print(f"错误: 无法找到预处理文件，请先运行预处理脚本。 {e}")
+        exit()
 
-        tg_df = pd.read_excel(telegram_file, dtype=str)
-        tg_df['MessageTimestamp'] = pd.to_datetime(tg_df['MessageTimestamp'], errors='coerce')
-        tg_df = tg_df.dropna(subset=['MessageTimestamp', 'Callsign', 'dofExecDate'])
-        tg_df['dofExecDate'] = pd.to_datetime(tg_df['dofExecDate']).dt.strftime('%Y-%m-%d')
-        tg_df_target = tg_df[tg_df['dofExecDate'] == target_date].copy()
-        tg_df_target['MessageType'] = tg_df_target['MessageType'].str.replace('AFTN_', '')
-        print(f"[LOG] 电报文件加载成功，筛选出 {len(tg_df_target)} 条目标日期的记录。")
+    aftn_final = get_aftn_final_summary(df_aftn)
+    fpla_final = get_fpla_final_summary(df_fpla)
+    final_report_df = compare_final_states(aftn_final, fpla_final)
 
-    except Exception as e:
-        print(f"致命错误: 加载或预处理文件时出错 - {e}")
-        return
+    if not final_report_df.empty:
+        final_report_df.to_csv(FINAL_COMPARISON_REPORT_FILE, index=False, encoding='utf-8-sig')
+        print(f"\n最终对比报告已生成: {FINAL_COMPARISON_REPORT_FILE}")
 
-    # --- [步骤 1] 核心修正：从源头过滤掉DEP和ARR ---
-    matchable_types = ['DLA', 'CHG', 'CNL', 'CPL', 'FPL']
-    tg_plan_changes_df = tg_df_target[tg_df_target['MessageType'].isin(matchable_types)].copy()
-
-    print(f"\n--- [步骤 1] 核心逻辑变更 ---")
-    print(f"[LOG] 已从目标日期的电报数据中过滤，只保留计划变更类报文。剩余 {len(tg_plan_changes_df)} 条。")
-    if not tg_plan_changes_df.empty:
-        print("[DEBUG] 剩余的计划变更类报文分布情况:")
-        print(tg_plan_changes_df['MessageType'].value_counts())
-    print("-" * 30)
-
-    # --- [步骤 2] 获取每个航班最新的“计划变更”事件 ---
-    if tg_plan_changes_df.empty:
-        print("警告：在目标日期内，未找到任何计划变更类电报 (DLA, CHG, CNL, CPL, FPL)。程序结束。")
-        return
-
-    latest_tg_events = tg_plan_changes_df.sort_values('MessageTimestamp').groupby('Callsign').tail(1)
-    print(f"--- [步骤 2] 完成: 找到 {len(latest_tg_events)} 个在 {target_date} 有最新“计划变更”的航班。---\n")
-
-    comparison_results = []
-    all_tg_flights = set(tg_df_target['Callsign'].unique())
-    processed_tg_flights = set(latest_tg_events['Callsign'].unique())
-
-    # --- [步骤 3] 遍历最新的计划变更事件进行匹配 ---
-    for _, tg_event in latest_tg_events.iterrows():
-        callsign = tg_event['Callsign']
-        result = {'Callsign': callsign, 'Match_Result': '', 'Details': ''}
-        result['Telegram_Latest_Type'] = tg_event['MessageType']
-        result['Telegram_Latest_Time'] = tg_event['MessageTimestamp']
-
-        fpla_group_df = fpla_df_target[fpla_df_target['CALLSIGN'] == callsign]
-
-        if fpla_group_df.empty:
-            result['Match_Result'] = 'FPLA中未找到对应航班'
-            comparison_results.append(result)
-            continue
-
-        tg_type = tg_event['MessageType']
-        equivalent_statuses = []
-        if tg_type == 'CPL':
-            tg_abnormal_status = tg_event.get('abnormalStatus', '')
-            if tg_abnormal_status in CPL_MATCHING_RULES: equivalent_statuses = CPL_MATCHING_RULES[tg_abnormal_status]
-        elif tg_type in MATCHING_RULES:
-            equivalent_statuses = MATCHING_RULES[tg_type]
-
-        if not equivalent_statuses: continue
-
-        fpla_candidates = fpla_group_df[fpla_group_df['PSCHEDULESTATUS'].isin(equivalent_statuses)].copy()
-
-        if fpla_candidates.empty:
-            result['Match_Result'] = '事件类型不匹配'
-            result['Details'] = f"电报最新计划变更({tg_type})在FPLA中无对应类型({equivalent_statuses})的动态"
-            comparison_results.append(result)
-            continue
-
-        fpla_candidates['Time_Diff'] = (
-                fpla_candidates['UPDATETIME'] - tg_event['MessageTimestamp']).dt.total_seconds().abs()
-        fpla_best_match = fpla_candidates.loc[fpla_candidates['Time_Diff'].idxmin()]
-
-        result['Match_Result'] = '成功匹配'
-        result['FPLA_Matched_Type'] = fpla_best_match['PSCHEDULESTATUS']
-        result['FPLA_Matched_Time'] = fpla_best_match['UPDATETIME']
-        time_diff_minutes = (fpla_best_match['UPDATETIME'] - tg_event['MessageTimestamp']).total_seconds() / 60
-        result['Time_Diff_Minutes'] = round(time_diff_minutes, 2)
-
-        comparison_results.append(result)
-
-    # --- [步骤 4] 标记那些只有DEP/ARR的航班 ---
-    flights_without_plan_changes = all_tg_flights - processed_tg_flights
-    for flight in flights_without_plan_changes:
-        result = {'Callsign': flight, 'Match_Result': '无计划变更事件',
-                  'Details': '该航班在电报中只有起飞/落地等非计划变更类消息'}
-        comparison_results.append(result)
-
-    # --- [步骤 5] 输出结果 ---
-    result_df = pd.DataFrame(comparison_results).fillna('')
-    result_df.to_excel(OUTPUT_COMPARISON_RESULT_FILE, index=False, engine='openpyxl')
-    print(f"\n--- 对比程序执行完毕！ ---")
-    print(f"结果已保存到文件: '{OUTPUT_COMPARISON_RESULT_FILE}'")
-
-
-if __name__ == '__main__':
-    correct_match_logic(FPLA_EXCEL_FILE, TELEGRAM_EXCEL_FILE, TARGET_EXEC_DATE)
+        print("\n--- 对比结果摘要 ---")
+        if 'ComparisonResult' in final_report_df.columns:
+            print(final_report_df['ComparisonResult'].value_counts())
+        if 'Timeliness_FPLA_Lead_Seconds' in final_report_df.columns:
+            matched_df = final_report_df[final_report_df['ComparisonResult'] == 'MATCHED']
+            if not matched_df.empty:
+                avg_lead_time = matched_df['Timeliness_FPLA_Lead_Seconds'].mean()
+                fpla_leading_count = (matched_df['Timeliness_FPLA_Lead_Seconds'] > 0).sum()
+                total_matched = len(matched_df)
+                if total_matched > 0:
+                    print(f"\nFPLA平均领先时间: {avg_lead_time:.2f} 秒 ({timedelta(seconds=abs(avg_lead_time))})")
+                    print(f"FPLA领先率: {fpla_leading_count / total_matched:.2%}")

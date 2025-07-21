@@ -3,7 +3,7 @@ import json
 import pandas as pd
 
 # --- 配置 ---
-FPLA_EXCEL_FILE = 'fpla_message-20250708.xlsx'
+FPLA_EXCEL_FILE = 'fpla_message-20250708-old.xlsx'
 SAMPLE_COUNT_PER_STATUS = 3  # 每种变更状态提取的样本数量
 # 定义我们关心的、可能发生变更的核心字段
 # (基于gxpt_aloi_fpla_message表的schema)
