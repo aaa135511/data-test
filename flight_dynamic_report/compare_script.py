@@ -10,40 +10,19 @@ FINAL_COMPARISON_REPORT_FILE = f'final_comparison_report_{TARGET_DATE_STR}.csv'
 
 
 def get_aftn_final_summary(df_aftn):
-    """
-    【最终版核心函数】：创建“AFTN最终动态综合体”，集成“信息前向填充”
-    """
-    if df_aftn.empty:
-        return pd.DataFrame()
-
+    """【最终版核心函数】：创建“AFTN最终动态综合体”，集成“信息前向填充”"""
+    if df_aftn.empty: return pd.DataFrame()
     print("开始生成AFTN最终动态综合体 (含信息前向填充)...")
-
-    # 确保ReceiveTime是datetime类型，方便排序
     df_aftn['ReceiveTime'] = pd.to_datetime(df_aftn['ReceiveTime'])
-
-    # --- 【关键升级】: 信息前向填充 ---
-    # 1. 首先对整个DataFrame按航班和时间排序
     df_aftn_sorted = df_aftn.sort_values(by=['FlightKey', 'ReceiveTime'])
-
-    # 2. 定义需要继承的关键信息列
     fill_cols = ['RegNo', 'CraftType', 'FlightNo', 'DepAirport', 'ArrAirport']
-
-    # 3. 按FlightKey分组，并对指定列进行前向填充
-    # 这会将一个航班前一条消息的有效信息，填充到后一条消息的空值中
     df_aftn_sorted[fill_cols] = df_aftn_sorted.groupby('FlightKey')[fill_cols].fillna(method='ffill')
-    # ------------------------------------
-
     final_summaries = []
-    # 使用填充和排序后的DataFrame进行后续处理
     for flight_key, group in df_aftn_sorted.groupby('FlightKey'):
-        # 查找最新的DEP和ARR报文 (现在这些报文已经包含了继承来的信息)
         latest_dep = group[group['MessageType'] == 'DEP'].nlargest(1, 'ReceiveTime')
         latest_arr = group[group['MessageType'] == 'ARR'].nlargest(1, 'ReceiveTime')
-
         summary_record = {}
-
         if not latest_dep.empty and not latest_arr.empty:
-            # --- 情况一：DEP和ARR都存在，进行合并 ---
             dep_row = latest_dep.iloc[0]
             arr_row = latest_arr.iloc[0]
             summary_record['FlightKey'] = flight_key
@@ -52,41 +31,72 @@ def get_aftn_final_summary(df_aftn):
             summary_record['FlightNo'] = dep_row['FlightNo']
             summary_record['DepAirport'] = dep_row['DepAirport']
             summary_record['ArrAirport'] = dep_row['ArrAirport']
-            # 注意：ARR报文的RegNo和CraftType可能为空，但现在已经被dep_row或更早的报文填充了
-            summary_record['RegNo'] = arr_row['RegNo']  # 取最终状态ARR时的RegNo
+            summary_record['RegNo'] = arr_row['RegNo']
             summary_record['CraftType'] = arr_row['CraftType']
             summary_record['SOBT_EOBT_ATOT'] = dep_row['SOBT_EOBT_ATOT']
             summary_record['SIBT_EIBT_AIBT'] = arr_row['SIBT_EIBT_AIBT']
         else:
-            # --- 情况二：不满足合并条件，直接取最后一条记录 ---
-            # 这条最后记录现在也已经包含了所有前序的有效信息
             latest_record = group.nlargest(1, 'ReceiveTime')
             if not latest_record.empty:
                 summary_record = latest_record.iloc[0].to_dict()
-
         if summary_record:
             final_summaries.append(summary_record)
-
     print(f"AFTN最终动态综合体生成完毕，共 {len(final_summaries)} 条记录。")
     return pd.DataFrame(final_summaries)
 
 
-# 其他函数保持不变
 def get_fpla_final_summary(df_fpla):
+    """核心函数：获取FPLA的最新动态"""
     if df_fpla.empty: return pd.DataFrame()
     print("开始提取FPLA最新动态...")
     df_fpla['ReceiveTime'] = pd.to_datetime(df_fpla['ReceiveTime'])
     return df_fpla.sort_values('ReceiveTime').drop_duplicates('FlightKey', keep='last')
 
 
+def compare_fields(fpla_val, aftn_val):
+    """辅助函数：对比单个字段并返回明确的对比状态"""
+    # isnull() 也能处理 None, np.nan 等情况
+    fpla_exists = pd.notna(fpla_val) and str(fpla_val).strip() != ''
+    aftn_exists = pd.notna(aftn_val) and str(aftn_val).strip() != ''
+
+    if fpla_exists and aftn_exists:
+        return 'MATCHED' if str(fpla_val) == str(aftn_val) else 'MISMATCHED'
+    elif fpla_exists and not aftn_exists:
+        return 'AFTN_MISSING'
+    elif not fpla_exists and aftn_exists:
+        return 'FPLA_MISSING'
+    else:
+        return 'BOTH_MISSING'
+
+
 def compare_final_states(df_aftn_final, df_fpla_final):
-    print("开始进行最终动态对比分析...")
+    """【全新重构】核心函数：进行一对一匹配，并生成结构化的对比报告"""
+    print("开始进行最终动态对比分析 (结构化报告版)...")
     comparison_df = pd.merge(df_fpla_final, df_aftn_final, on='FlightKey', how='outer', suffixes=('_FPLA', '_AFTN'))
     results = []
     for index, row in comparison_df.iterrows():
-        result_row = {'FlightKey': row['FlightKey']}
+        # --- 1. 初始化，先填充数据列 ---
+        result_row = {
+            'FlightKey': row['FlightKey'],
+            'FPLA_MessageType': row.get('MessageType_FPLA'),
+            'FPLA_ReceiveTime': row.get('ReceiveTime_FPLA'),
+            'FPLA_RegNo': row.get('RegNo_FPLA'),
+            'FPLA_CraftType': row.get('CraftType_FPLA'),
+            'FPLA_SOBT': row.get('SOBT_EOBT_ATOT_FPLA'),
+            'FPLA_SIBT': row.get('SIBT_EIBT_AIBT_FPLA'),
+            'AFTN_MessageType': row.get('MessageType_AFTN'),
+            'AFTN_ReceiveTime': row.get('ReceiveTime_AFTN'),
+            'AFTN_RegNo': row.get('RegNo_AFTN'),
+            'AFTN_CraftType': row.get('CraftType_AFTN'),
+            'AFTN_ATOT': row.get('SOBT_EOBT_ATOT_AFTN'),
+            'AFTN_AIBT': row.get('SIBT_EIBT_AIBT_AFTN'),
+        }
+
+        # --- 2. 计算对比结论，并将结论列追加到末尾 ---
         fpla_exists = pd.notna(row.get('ReceiveTime_FPLA'))
         aftn_exists = pd.notna(row.get('ReceiveTime_AFTN'))
+
+        # 总体对比结论
         if fpla_exists and not aftn_exists:
             result_row['ComparisonResult'] = 'FPLA_ONLY'
         elif not fpla_exists and aftn_exists:
@@ -95,31 +105,22 @@ def compare_final_states(df_aftn_final, df_fpla_final):
             result_row['ComparisonResult'] = 'MATCHED'
         else:
             continue
+
+        # 及时性对比结论
         if result_row['ComparisonResult'] == 'MATCHED':
             time_diff = (row['ReceiveTime_AFTN'] - row['ReceiveTime_FPLA']).total_seconds()
             result_row['Timeliness_FPLA_Lead_Seconds'] = time_diff
-        mismatched_fields = []
-        if result_row['ComparisonResult'] == 'MATCHED':
-            if str(row.get('RegNo_FPLA', '')) != str(row.get('RegNo_AFTN', '')):
-                mismatched_fields.append(
-                    f"RegNo(FPLA:{row.get('RegNo_FPLA', 'N/A')}, AFTN:{row.get('RegNo_AFTN', 'N/A')})")
-            if str(row.get('CraftType_FPLA', '')) != str(row.get('CraftType_AFTN', '')):
-                mismatched_fields.append(
-                    f"CraftType(FPLA:{row.get('CraftType_FPLA', 'N/A')}, AFTN:{row.get('CraftType_AFTN', 'N/A')})")
-        result_row['Accuracy_Mismatch'] = "; ".join(mismatched_fields) if mismatched_fields else None
-        result_row['FPLA_MessageType'] = row.get('MessageType_FPLA')
-        result_row['FPLA_ReceiveTime'] = row.get('ReceiveTime_FPLA')
-        result_row['FPLA_RegNo'] = row.get('RegNo_FPLA')
-        result_row['FPLA_CraftType'] = row.get('CraftType_FPLA')
-        result_row['FPLA_SOBT'] = row.get('SOBT_EOBT_ATOT_FPLA')
-        result_row['FPLA_SIBT'] = row.get('SIBT_EIBT_AIBT_FPLA')
-        result_row['AFTN_MessageType'] = row.get('MessageType_AFTN')
-        result_row['AFTN_ReceiveTime'] = row.get('ReceiveTime_AFTN')
-        result_row['AFTN_RegNo'] = row.get('RegNo_AFTN')
-        result_row['AFTN_CraftType'] = row.get('CraftType_AFTN')
-        result_row['AFTN_ATOT'] = row.get('SOBT_EOBT_ATOT_AFTN')
-        result_row['AFTN_AIBT'] = row.get('SIBT_EIBT_AIBT_AFTN')
+        else:
+            result_row['Timeliness_FPLA_Lead_Seconds'] = None
+
+        # 机号准确性对比结论
+        result_row['RegNo_Comparison'] = compare_fields(row.get('RegNo_FPLA'), row.get('RegNo_AFTN'))
+
+        # 机型准确性对比结论
+        result_row['CraftType_Comparison'] = compare_fields(row.get('CraftType_FPLA'), row.get('CraftType_AFTN'))
+
         results.append(result_row)
+
     print("对比分析完成！")
     return pd.DataFrame(results)
 
@@ -141,9 +142,12 @@ if __name__ == "__main__":
         final_report_df.to_csv(FINAL_COMPARISON_REPORT_FILE, index=False, encoding='utf-8-sig')
         print(f"\n最终对比报告已生成: {FINAL_COMPARISON_REPORT_FILE}")
 
+        # --- 打印更详细的统计摘要 ---
         print("\n--- 对比结果摘要 ---")
         if 'ComparisonResult' in final_report_df.columns:
+            print("\n[整体覆盖度对比]")
             print(final_report_df['ComparisonResult'].value_counts())
+
         if 'Timeliness_FPLA_Lead_Seconds' in final_report_df.columns:
             matched_df = final_report_df[final_report_df['ComparisonResult'] == 'MATCHED']
             if not matched_df.empty:
@@ -151,5 +155,14 @@ if __name__ == "__main__":
                 fpla_leading_count = (matched_df['Timeliness_FPLA_Lead_Seconds'] > 0).sum()
                 total_matched = len(matched_df)
                 if total_matched > 0:
-                    print(f"\nFPLA平均领先时间: {avg_lead_time:.2f} 秒 ({timedelta(seconds=abs(avg_lead_time))})")
+                    print("\n[及时性对比 (仅限匹配成功的航班)]")
+                    print(f"FPLA平均领先时间: {avg_lead_time:.2f} 秒 ({timedelta(seconds=abs(avg_lead_time))})")
                     print(f"FPLA领先率: {fpla_leading_count / total_matched:.2%}")
+
+        if 'RegNo_Comparison' in final_report_df.columns:
+            print("\n[航空器注册号准确性对比]")
+            print(final_report_df['RegNo_Comparison'].value_counts())
+
+        if 'CraftType_Comparison' in final_report_df.columns:
+            print("\n[机型准确性对比]")
+            print(final_report_df['CraftType_Comparison'].value_counts())
