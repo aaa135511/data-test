@@ -4,196 +4,155 @@ import re
 from datetime import datetime, timedelta
 
 # ==============================================================================
-# --- 1. 配置与加载区 ---
+# --- 1. 配置区 ---
 # ==============================================================================
 TARGET_DATE_STR = "2025-07-08"
 AFTN_PROCESSED_FILE = f'processed_aftn_dynamic_final_{TARGET_DATE_STR}.csv'
 FPLA_PROCESSED_FILE = f'processed_fpla_plan_final_{TARGET_DATE_STR}.csv'
-COMPARISON_REPORT_FILE = f'comparison_report_final_{TARGET_DATE_STR}.csv'
+
+# 输出文件名
+COMPARISON_ADD_FILE = f'comparison_ADD_{TARGET_DATE_STR}.csv'
+COMPARISON_CNL_FILE = f'comparison_CNL_{TARGET_DATE_STR}.csv'
+COMPARISON_TIME_CHANGE_FILE = f'comparison_TIME_CHANGE_{TARGET_DATE_STR}.csv'
+COMPARISON_REG_CHANGE_FILE = f'comparison_REG_CHANGE_{TARGET_DATE_STR}.csv'
+COMPARISON_INCONSISTENT_FILE = f'comparison_INCONSISTENT_{TARGET_DATE_STR}.csv'
 
 
 # ==============================================================================
-# --- 2. 辅助函数与映射关系 ---
+# --- 2. 辅助函数 ---
 # ==============================================================================
-
 def convert_to_comparable_sobt(row, target_date):
-    """将AFTN的时刻和日期信息转换为标准的datetime对象。"""
+    """将AFTN的时刻和日期信息转换为标准的datetime对象，以便比较。"""
     time_str = row.get('New_Departure_Time')
-    if pd.isna(time_str):
-        return None
-
-    time_str = str(int(time_str)).zfill(4)
-
-    date_part = target_date
-    dof_str = row.get('New_DOF')
-    if pd.notna(dof_str):
-        try:
+    if pd.isna(time_str) or time_str == '': return None
+    try:
+        time_str = str(int(float(time_str))).zfill(4)
+        date_part = target_date
+        dof_str = row.get('New_DOF')
+        if pd.notna(dof_str):
             date_part = datetime.strptime(f"20{int(dof_str)}", "%Y%m%d").date()
-        except:
-            pass  # 如果格式错误，则使用target_date
-
-    return datetime.combine(date_part, datetime.strptime(time_str, "%H%M").time())
-
-
-def identify_aftn_event(current_row, timeline_group):
-    """识别单条AFTN消息代表的核心变更事件。"""
-    msg_type = current_row['MessageType']
-
-    # 获取此AFTN消息之前，该航班的最新状态
-    previous_states = timeline_group[timeline_group['ReceiveTime'] < current_row['ReceiveTime']]
-
-    # 获取最新的AFTN状态
-    previous_aftn_state = previous_states[previous_states['Source'] == 'AFTN'].iloc[-1] if not previous_states[
-        previous_states['Source'] == 'AFTN'].empty else {}
-
-    if msg_type == 'FPL': return 'ADD', None
-    if msg_type == 'CNL': return 'CNL', None
-
-    if msg_type == 'DLA' or (msg_type == 'CHG' and pd.notna(current_row['New_Departure_Time'])):
-        return 'TIME_CHANGE', convert_to_comparable_sobt(current_row, TARGET_DATE_OBJ)
-
-    if msg_type == 'CHG':
-        # 机号变更
-        new_reg = current_row.get('New_RegNo')
-        if pd.notna(new_reg) and new_reg != previous_aftn_state.get('RegNo', previous_aftn_state.get('New_RegNo')):
-            return 'REG_CHANGE', new_reg
-
-        # 任务变更
-        if pd.notna(current_row['New_Mission_STS']) or pd.notna(current_row['New_FlightType']):
-            return 'MISSION_CHANGE', f"STS:{current_row.get('New_Mission_STS')}, Type:{current_row.get('New_FlightType')}"
-
-        # 航站变更
-        new_dest = current_row.get('New_Destination')
-        if pd.notna(new_dest):
-            orig_dep = previous_aftn_state.get('DepAirport', previous_aftn_state.get('New_Departure_Airport'))
-            orig_dest = previous_aftn_state.get('ArrAirport', previous_aftn_state.get('New_Destination'))
-            if new_dest == orig_dep:
-                return 'RETURN', new_dest
-            elif new_dest != orig_dest:
-                return 'TERMINAL_CHANGE', new_dest
-
-    return 'OTHER_UPDATE', None
-
-
-def find_fpla_correspondence(aftn_event_type, aftn_event_time, aftn_event_detail, fpla_timeline):
-    """在FPLA时间轴上寻找与AFTN事件对应的消息。"""
-    # 从AFTN事件发生时间之后开始查找
-    future_fpla_messages = fpla_timeline[fpla_timeline['ReceiveTime'] >= aftn_event_time]
-
-    for index, fpla_row in future_fpla_messages.iterrows():
-        fpla_status = fpla_row['MessageType']
-
-        if aftn_event_type == 'ADD' and fpla_status == 'ADD':
-            return fpla_row
-        if aftn_event_type == 'CNL' and fpla_status == 'CNL':
-            return fpla_row
-        if aftn_event_type == 'REG_CHANGE' and fpla_row['RegNo'] == aftn_event_detail:
-            return fpla_row
-        if aftn_event_type == 'TIME_CHANGE' and fpla_row['SOBT'] == aftn_event_detail:
-            return fpla_row
-        if aftn_event_type == 'RETURN' and fpla_status == 'RTN':
-            return fpla_row
-        if aftn_event_type == 'TERMINAL_CHANGE':
-            if fpla_status == 'ALN' and fpla_row['ArrAirport'] == aftn_event_detail:
-                return fpla_row
-            # 也可以匹配UPD中目的地变更的情况
-            if fpla_status == 'UPD' and fpla_row['ArrAirport'] == aftn_event_detail:
-                return fpla_row
-
-    return None  # 如果找不到，返回None
+        return datetime.combine(date_part, datetime.strptime(time_str, "%H%M").time())
+    except (ValueError, TypeError):
+        return None
 
 
 # ==============================================================================
 # --- 3. 主对比逻辑 ---
 # ==============================================================================
+
 def run_comparison_analysis():
-    """执行完整的对比分析流程。"""
-    print("--- 开始执行AFTN与FPLA的精确对比分析 ---")
+    print("--- 开始执行基于数据洞察的精确对比分析 V4 (已修正) ---")
 
     # --- 1. 数据加载 ---
     try:
         aftn_df = pd.read_csv(AFTN_PROCESSED_FILE, low_memory=False)
         fpla_df = pd.read_csv(FPLA_PROCESSED_FILE, low_memory=False)
     except FileNotFoundError as e:
-        print(f"错误: 无法找到输入文件。请确保以下文件存在: \n{AFTN_PROCESSED_FILE}\n{FPLA_PROCESSED_FILE}")
-        print(f"详细错误: {e}")
+        print(f"错误: 无法找到输入文件。请确保预处理文件存在。\n{e}")
         return
 
-    # --- 2. 数据预处理与合并 ---
-    aftn_df['Source'] = 'AFTN'
-    fpla_df['Source'] = 'FPLA'
+    # --- 2. 数据准备与统一化 ---
+    # 对AFTN数据进行转换，生成可比较的字段
+    aftn_df['ReceiveTime'] = pd.to_datetime(aftn_df['ReceiveTime'], errors='coerce')
+    aftn_df['ComparableSOBT'] = aftn_df.apply(lambda row: convert_to_comparable_sobt(row, TARGET_DATE_OBJ), axis=1)
 
-    # 统一时间格式以便排序和计算
-    for df in [aftn_df, fpla_df]:
-        df['ReceiveTime'] = pd.to_datetime(df['ReceiveTime'], errors='coerce')
+    # 对FPLA数据进行准备
+    fpla_df['ReceiveTime'] = pd.to_datetime(fpla_df['ReceiveTime'], errors='coerce')
     fpla_df['SOBT'] = pd.to_datetime(fpla_df['SOBT'], errors='coerce')
 
-    timeline_df = pd.concat([aftn_df, fpla_df], ignore_index=True)
-    timeline_df.dropna(subset=['ReceiveTime'], inplace=True)
-    timeline_df.sort_values(by=['FlightKey', 'ReceiveTime'], inplace=True)
+    all_flight_keys = set(aftn_df['FlightKey'].dropna()) | set(fpla_df['FlightKey'].dropna())
+    print(f"共发现 {len(all_flight_keys)} 个独立航班进行分析。")
 
-    print(f"数据加载与合并完成，共计 {len(timeline_df)} 条时间轴记录。")
+    results = {
+        'ADD': [], 'CNL': [], 'TIME_CHANGE': [], 'REG_CHANGE': [], 'INCONSISTENT': []
+    }
 
-    # --- 3. 逐事件对比 ---
-    comparison_results = []
+    # --- 3. 逐航班进行对比分析 ---
+    for flight_key in all_flight_keys:
+        aftn_timeline = aftn_df[aftn_df['FlightKey'] == flight_key].sort_values('ReceiveTime').reset_index(drop=True)
+        fpla_timeline = fpla_df[fpla_df['FlightKey'] == flight_key].sort_values('ReceiveTime').reset_index(drop=True)
 
-    # 筛选出所有AFTN消息进行遍历
-    aftn_messages = timeline_df[timeline_df['Source'] == 'AFTN']
-
-    for index, aftn_row in aftn_messages.iterrows():
-        flight_key = aftn_row['FlightKey']
-
-        # 获取该航班的完整时间轴
-        flight_timeline = timeline_df[timeline_df['FlightKey'] == flight_key]
-
-        # 识别AFTN事件
-        event_type, event_detail = identify_aftn_event(aftn_row, flight_timeline)
-
-        if event_type is None: continue  # 忽略无法识别的事件
-
-        # 在FPLA轨道上寻找对应消息
-        fpla_timeline = flight_timeline[flight_timeline['Source'] == 'FPLA']
-        fpla_corr_row = find_fpla_correspondence(event_type, aftn_row['ReceiveTime'], event_detail, fpla_timeline)
-
-        # --- 4. 记录对比结果 ---
-        result_record = {
+        # 1. 对比航班新增 (ADD)
+        aftn_add_time = aftn_timeline[aftn_timeline['MessageType'] == 'FPL']['ReceiveTime'].min()
+        fpla_add_time = fpla_timeline[fpla_timeline['MessageType'].isin(['ADD', 'ALL'])]['ReceiveTime'].min()
+        results['ADD'].append({
             'FlightKey': flight_key,
-            'AFTN_Event_Type': event_type,
-            'AFTN_ReceiveTime': aftn_row['ReceiveTime'],
-            'AFTN_Change_Detail': str(event_detail),
-            'AFTN_RawMessage': aftn_row.get('RawMessage', '')
-        }
+            'FPLA_First_Receive': fpla_add_time,
+            'AFTN_First_Receive': aftn_add_time,
+            'Lead_Time_Hours': round((aftn_add_time - fpla_add_time).total_seconds() / 3600, 2) if pd.notna(
+                aftn_add_time) and pd.notna(fpla_add_time) else np.nan
+        })
 
-        if fpla_corr_row is not None:
-            time_diff = (fpla_corr_row['ReceiveTime'] - aftn_row['ReceiveTime']).total_seconds() / 60.0
-
-            result_record.update({
-                'FPLA_Found': 'Yes',
-                'FPLA_ReceiveTime': fpla_corr_row['ReceiveTime'],
-                'FPLA_Status': fpla_corr_row['MessageType'],
-                'Time_Diff_Minutes': round(time_diff, 2),
-                'Match_Status': 'Consistent'
+        # 2. 对比航班取消 (CNL)
+        aftn_cnl_time = aftn_timeline[aftn_timeline['MessageType'] == 'CNL']['ReceiveTime'].min()
+        fpla_cnl_time = fpla_timeline[fpla_timeline['MessageType'] == 'CNL']['ReceiveTime'].min()
+        if pd.notna(aftn_cnl_time) or pd.notna(fpla_cnl_time):
+            results['CNL'].append({
+                'FlightKey': flight_key,
+                'FPLA_CNL_Time': fpla_cnl_time,
+                'AFTN_CNL_Time': aftn_cnl_time
             })
 
-            # 识别FPLA的优越性
-            if event_type in ['RETURN', 'TERMINAL_CHANGE'] and fpla_corr_row['MessageType'] in ['RTN', 'ALN']:
-                result_record['Match_Status'] = 'Superior (More Specific)'
+        # 3. 对比机号变更 (以FPLA为基准)
+        fpla_timeline['RegNo_lag'] = fpla_timeline['RegNo'].shift(1)
+        fpla_reg_changes = fpla_timeline[fpla_timeline['RegNo'] != fpla_timeline['RegNo_lag']]
+        for idx, change in fpla_reg_changes.iterrows():
+            if idx == 0 and pd.notna(change['RegNo']):  # 首次出现机号也算一次事件
+                pass
+            elif idx == 0:
+                continue
 
-        else:
-            result_record.update({
-                'FPLA_Found': 'No',
-                'FPLA_ReceiveTime': None,
-                'FPLA_Status': None,
-                'Time_Diff_Minutes': None,
-                'Match_Status': 'FPLA_MISSING'
+            event_time = change['ReceiveTime'];
+            new_reg = change['RegNo']
+            aftn_corr = aftn_timeline[
+                (aftn_timeline['New_RegNo'] == new_reg) & (aftn_timeline['ReceiveTime'] >= event_time)]
+            results['REG_CHANGE'].append({
+                'FlightKey': flight_key, 'FPLA_Event_Time': event_time, 'New_RegNo': new_reg,
+                'AFTN_Match_Time': aftn_corr['ReceiveTime'].min()
             })
 
-        comparison_results.append(result_record)
+        # 4. 对比时刻变更 (以FPLA为基准)
+        fpla_timeline['SOBT_lag'] = fpla_timeline['SOBT'].shift(1)
+        fpla_time_changes = fpla_timeline[fpla_timeline['SOBT'] != fpla_timeline['SOBT_lag']]
+        for idx, change in fpla_time_changes.iterrows():
+            if idx == 0 and pd.notna(change['SOBT']):
+                pass
+            elif idx == 0:
+                continue
+            event_time = change['ReceiveTime'];
+            new_sobt = change['SOBT']
+            aftn_corr = aftn_timeline[aftn_timeline['ComparableSOBT'] == new_sobt]
+            results['TIME_CHANGE'].append({
+                'FlightKey': flight_key, 'FPLA_Event_Time': event_time, 'New_SOBT': new_sobt,
+                'AFTN_Match_Time': aftn_corr['ReceiveTime'].min()
+            })
 
-    # --- 5. 保存报告 ---
-    report_df = pd.DataFrame(comparison_results)
-    report_df.to_csv(COMPARISON_REPORT_FILE, index=False, encoding='utf-8-sig')
-    print(f"\n对比分析完成！详细报告已保存至: {COMPARISON_REPORT_FILE}")
+        # 5. 检查严重不一致 (以AFTN的DLA为基准)
+        if not fpla_timeline.empty and not aftn_timeline.empty:
+            last_fpla_sobt = fpla_timeline.iloc[-1]['SOBT']
+            dla_messages = aftn_timeline[aftn_timeline['MessageType'] == 'DLA']
+            for idx, dla in dla_messages.iterrows():
+                aftn_sobt = dla['ComparableSOBT']
+                if pd.notna(last_fpla_sobt) and pd.notna(aftn_sobt) and abs(
+                    (last_fpla_sobt - aftn_sobt).total_seconds()) > 60:  # 超过1分钟差异就算不一致
+                    results['INCONSISTENT'].append({
+                        'FlightKey': flight_key, 'FPLA_Final_SOBT': last_fpla_sobt, 'AFTN_DLA_Time': aftn_sobt,
+                        'AFTN_Receive_Time': dla['ReceiveTime'], 'AFTN_RawMessage': dla['RawMessage']
+                    })
+
+    # --- 4. 保存报告 ---
+    pd.DataFrame(results['ADD']).to_csv(COMPARISON_ADD_FILE, index=False, encoding='utf-8-sig')
+    pd.DataFrame(results['CNL']).to_csv(COMPARISON_CNL_FILE, index=False, encoding='utf-8-sig')
+    pd.DataFrame(results['TIME_CHANGE']).to_csv(COMPARISON_TIME_CHANGE_FILE, index=False, encoding='utf-8-sig')
+    pd.DataFrame(results['REG_CHANGE']).to_csv(COMPARISON_REG_CHANGE_FILE, index=False, encoding='utf-8-sig')
+    pd.DataFrame(results['INCONSISTENT']).to_csv(COMPARISON_INCONSISTENT_FILE, index=False, encoding='utf-8-sig')
+
+    print(f"\n对比分析完成！已生成以下5份详细报告:")
+    print(f" - {COMPARISON_ADD_FILE} (航班新增对比)")
+    print(f" - {COMPARISON_CNL_FILE} (航班取消对比)")
+    print(f" - {COMPARISON_TIME_CHANGE_FILE} (时刻变更对比)")
+    print(f" - {COMPARISON_REG_CHANGE_FILE} (机号变更对比)")
+    print(f" - {COMPARISON_INCONSISTENT_FILE} (严重不一致记录)")
 
 
 # ==============================================================================

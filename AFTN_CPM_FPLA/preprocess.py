@@ -123,14 +123,17 @@ def parse_change_items_complete(body):
 # ==============================================================================
 
 def process_aftn_dynamic_data(input_file, target_date):
-    """【AFTN预处理器】"""
-    print(f"--- 开始处理AFTN动态电报: {input_file} ---")
+    """
+    【最终修正版 - 精准航班号解析】
+    从原始报文中直接提取完整的航班号信息，确保FlightKey的正确性。
+    """
+    print(f"--- 开始处理AFTN动态电报 (精准航班号解析模式): {input_file} ---")
     try:
         df = pd.read_csv(input_file, header=None, on_bad_lines='skip')
         json_col_index = 1
         db_time_col_index = -1
     except FileNotFoundError:
-        print(f"错误: AFTN输入文件 '{input_file}' 未找到。程序将退出。")
+        print(f"错误: AFTN输入文件 '{input_file}' 未找到。")
         return pd.DataFrame()
 
     processed_records = []
@@ -140,16 +143,24 @@ def process_aftn_dynamic_data(input_file, target_date):
             tele_body = data.get('teleBody', '')
             msg_type = tele_body[1:4].strip()
 
-            # 我们关注计划和变更，忽略起飞(DEP)和落地(ARR)报
             if msg_type in ['DEP', 'ARR']: continue
 
             flight_date = get_flight_date_from_aftn(data, tele_body)
             if not flight_date or flight_date != target_date: continue
 
-            flight_no_raw = data.get('flightNo', '')
-            flight_no = str(flight_no_raw).lstrip('0')
-            airline_code = data.get('airlineIcaoCode', '')
-            full_flight_no = f"{airline_code}{flight_no}"
+            # --- 【核心修正逻辑】 ---
+            # 直接从报文正文中提取最完整的航班号
+            # FPL/CHG/DLA等报文的格式通常是 (TYP-FLIGHTNO-...)
+            # 例如 (FPL-CES2104-IS...) 或 (DLA-CFI057-...)
+            match = re.search(r'^\([A-Z]{3}-([A-Z0-9\-]+)-', tele_body)
+            if match:
+                full_flight_no = match.group(1)
+            else:
+                # 如果正则匹配失败，使用备用方案（可能不含后缀）
+                airline_code = data.get('airlineIcaoCode', '')
+                flight_no = str(data.get('flightNo', '')).lstrip('0')
+                full_flight_no = f"{airline_code}{flight_no}"
+            # -------------------------
 
             dep_icao = data.get('depAirportIcaoCode')
             arr_icao = data.get('arrAirportIcaoCode')
@@ -171,7 +182,8 @@ def process_aftn_dynamic_data(input_file, target_date):
                 change_details = parse_change_items_complete(tele_body)
             elif msg_type == 'DLA':
                 dla_match = re.search(r'-(\w{4,7})(\d{4})-', tele_body)
-                if dla_match: change_details['New_Departure_Time'] = dla_match.group(2)
+                if dla_match:
+                    change_details['New_Departure_Time'] = dla_match.group(2)
 
             record.update(change_details)
             processed_records.append(record)
@@ -181,7 +193,6 @@ def process_aftn_dynamic_data(input_file, target_date):
 
     print(f"AFTN数据处理完成，共解析出 {len(processed_records)} 条目标日期的计划/动态报文。")
     return pd.DataFrame(processed_records)
-
 
 def process_fpla_data(input_file, target_date):
     """【FPLA预处理器 - 增强版】"""
