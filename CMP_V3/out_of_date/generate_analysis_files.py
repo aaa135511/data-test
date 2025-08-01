@@ -3,7 +3,7 @@ import json
 import re
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime
 from dotenv import load_dotenv
 
 # ==============================================================================
@@ -11,21 +11,21 @@ from dotenv import load_dotenv
 # ==============================================================================
 load_dotenv()
 TARGET_DATE_STR = os.getenv("TARGET_DATE")
-AIRPORT = os.getenv("AIRPORT")
 if not TARGET_DATE_STR:
     print("错误: 未在 .env 文件中找到 TARGET_DATE 设置。")
     print("请在项目根目录创建 .env 文件，并添加一行: TARGET_DATE=\"YYYY-MM-DD\"")
     sys.exit(1)
 
-# 文件路径与常量定义 (FPLA文件路径将在主程序中动态生成)
+# 文件路径与常量定义
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 RAW_DATA_DIR = os.path.join(BASE_DIR, 'raw_data')
 AFTN_CSV_FILE = os.path.join(RAW_DATA_DIR, 'sqlResult.csv')
+FPLA_XLSX_FILE = os.path.join(RAW_DATA_DIR, 'data_core_gxpt_aloi_fpla_message.xlsx')
 PREPROCESSED_DIR = os.path.join(BASE_DIR, 'preprocessed_files')
 
 
 # ==============================================================================
-# --- 2. 辅助函数 (本节无改动) ---
+# --- 2. 辅助函数 ---
 # ==============================================================================
 def generate_flight_key(exec_date, flight_no, dep_icao, arr_icao):
     """根据核心航班信息生成唯一的、可用于关联的键。"""
@@ -83,7 +83,7 @@ def parse_core_business_info(body):
 
 
 # ==============================================================================
-# --- 3. 核心处理函数 (本节无改动) ---
+# --- 3. 核心处理函数 ---
 # ==============================================================================
 def process_aftn_for_analysis(df, target_date):
     """预处理AFTN数据"""
@@ -135,10 +135,8 @@ def process_aftn_for_analysis(df, target_date):
 def process_fpla_for_analysis(df, target_date):
     """预处理FPLA数据"""
     processed_records = []
-    # 注意：传入此函数的df的列名应已被映射为英文
     for index, row in df.iterrows():
         try:
-            # 内部逻辑保持不变，使用英文列名进行数据提取
             sobt_str = str(row.get('SOBT')).split('.')[0]
             if len(sobt_str) < 8: continue
 
@@ -161,7 +159,7 @@ def process_fpla_for_analysis(df, target_date):
 
 
 # ==============================================================================
-# --- 4. 主程序入口 (本节有重要修改) ---
+# --- 4. 主程序入口 ---
 # ==============================================================================
 def main():
     try:
@@ -173,11 +171,13 @@ def main():
     print(f"\n===== 开始为日期 {TARGET_DATE_STR} 生成分析文件 =====")
     os.makedirs(PREPROCESSED_DIR, exist_ok=True)
 
-    # --- AFTN 数据处理 ---
     AFTN_ANALYSIS_COLS = ['FlightKey', 'ReceiveTime', 'MessageType', 'FlightNo', 'New_FlightNo', 'CraftType',
                           'New_CraftType', 'RegNo', 'New_RegNo', 'DepAirport', 'ArrAirport', 'New_Destination',
                           'New_Alternate_1', 'New_Alternate_2', 'New_Departure_Time', 'New_Route', 'New_Mission_STS',
                           'RawMessage']
+    FPLA_ANALYSIS_COLS = ['FlightKey', 'ReceiveTime', 'FPLA_Status', 'FlightNo', 'CraftType', 'RegNo', 'DepAirport',
+                          'ArrAirport', 'SOBT', 'SIBT', 'Route', 'MissionType', 'MissionProperty']
+
     try:
         print(f"--- 正在读取原始AFTN文件: {AFTN_CSV_FILE} ---")
         aftn_raw_df = pd.read_csv(AFTN_CSV_FILE, header=None, on_bad_lines='skip')
@@ -192,59 +192,10 @@ def main():
     except FileNotFoundError:
         print(f"错误: 原始AFTN文件 '{AFTN_CSV_FILE}' 未找到。")
 
-    # --- FPLA 数据处理 ---
-    FPLA_ANALYSIS_COLS = ['FlightKey', 'ReceiveTime', 'FPLA_Status', 'FlightNo', 'CraftType', 'RegNo', 'DepAirport',
-                          'ArrAirport', 'SOBT', 'SIBT', 'Route', 'MissionType', 'MissionProperty']
-
-    # === 新增改动 1: 动态生成FPLA文件名 ===
-    start_date_str = target_date_obj.strftime('%Y%m%d000000')
-    end_date_str = (target_date_obj + timedelta(days=1)).strftime('%Y%m%d000000')
-    fpla_filename = f"FPLA-Details-{AIRPORT}-{start_date_str}-{end_date_str}.xlsx"
-    FPLA_XLSX_FILE = os.path.join(RAW_DATA_DIR, fpla_filename)
-
-    # === 新增改动 2: 定义中文到英文的表头映射 ===
-    # 基于您提供的Java实体类 NewFplaDetailsExcelResponse
-    FPLA_COLUMN_MAP = {
-        "全球唯一飞行标识符": "GUFI",
-        "航空器识别标志": "CALLSIGN",
-        "共享单位航班标识符": "UNITUFI",
-        "航空器注册号": "REGNUMBER",
-        "航空器地址码": "ADDRESSCODE",
-        "计划离港时间": "SOBT",
-        "计划到港时间": "SIBT",
-        "计划起飞机场": "DEPAP",
-        "计划目的地机场": "ARRAP",
-        "机场保障计划离港时间": "APTSOBT",
-        "机场保障计划到港时间": "APTSIBT",
-        "机场保障计划起飞机场": "APTDEPAP",
-        "机场保障计划目的地机场": "APTARRAP",
-        "执飞航空器注册号": "EREGNUMBER",
-        "执飞航空器地址码": "EADDRESSCODE",
-        "预执行航班取消原因": "PCNLREASON",
-        "预执行航班延误原因": "PDELAYREASON",
-        "预执行任务性质": "PMISSIONPROPERTY",
-        "预执行客货属性": "PGJ",
-        "预执行计划机型": "PSAIRCRAFTTYPE",
-        "预执行航线属性": "LIFLAG",
-        "预执行计划状态": "PSCHEDULESTATUS",
-        "预执行航段": "PFLIGHTLAG",
-        "预执行共享航班号": "PSHAREFLIGHTNO",
-        "预执行计划种类": "PMISSIONTYPE",
-        "计划航路": "SROUTE",
-        "消息发送时间": "SENDTIME",
-        "格式校验结果": "FORMATCHECKRESULT",
-        "逻辑校验结果": "LOGICCHECKRESULT",
-        "及时性校验结果": "ISTIMELY",
-        "校验结论": "ALLCHECKRESULT"
-    }
-
     try:
         print(f"--- 正在读取原始FPLA文件: {FPLA_XLSX_FILE} ---")
         fpla_raw_df = pd.read_excel(FPLA_XLSX_FILE)
-
-        # === 新增改动 3: 重命名列名以匹配旧逻辑 ===
-        fpla_raw_df.rename(columns=FPLA_COLUMN_MAP, inplace=True)
-
+        fpla_raw_df.columns = [str(col).strip().upper() for col in fpla_raw_df.columns]
         fpla_df = process_fpla_for_analysis(fpla_raw_df, target_date_obj)
         if not fpla_df.empty:
             output_path = os.path.join(PREPROCESSED_DIR, f'analysis_fpla_data_{TARGET_DATE_STR}.csv')
@@ -254,9 +205,7 @@ def main():
         else:
             print("警告: 未找到指定日期的FPLA数据。")
     except FileNotFoundError:
-        print(f"错误: 原始FPLA文件 '{FPLA_XLSX_FILE}' 未找到。请确认该文件存在且日期正确。")
-    except Exception as e:
-        print(f"处理FPLA文件时发生未知错误: {e}")
+        print(f"错误: 原始FPLA文件 '{FPLA_XLSX_FILE}' 未找到。")
 
     print(f"\n===== 日期 {TARGET_DATE_STR} 的预处理任务已完成 =====")
 
