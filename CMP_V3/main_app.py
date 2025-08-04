@@ -17,7 +17,7 @@ from tkinter import filedialog, messagebox, scrolledtext
 # (这部分代码保持不变，直接从您的两个脚本中复制过来)
 # ==============================================================================
 
-# --- 来自 generate_analysis_files.py 的函数 ---
+# --- 来自 generate_analysis_files_v1.py 的函数 ---
 def generate_flight_key(exec_date, flight_no, dep_icao, arr_icao):
     if not all([exec_date, flight_no, dep_icao, arr_icao]): return "KEY_GENERATION_FAILED"
     flight_no, dep_icao, arr_icao = str(flight_no).strip(), str(dep_icao).strip(), str(arr_icao).strip()
