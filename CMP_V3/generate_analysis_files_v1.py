@@ -91,7 +91,7 @@ def parse_core_business_info(body):
 
 
 # ==============================================================================
-# --- 3. 核心处理函数 (已修正航班号和CPL解析逻辑) ---
+# --- 3. 核心处理函数 ---
 # ==============================================================================
 def process_aftn_for_analysis(df, target_date):
     processed_records = []
@@ -108,16 +108,11 @@ def process_aftn_for_analysis(df, target_date):
             flight_date = get_flight_date_from_aftn(tele_body, receive_time)
             if not flight_date or flight_date != target_date: continue
 
-            # <<<<<<<<<<<<<<< 航班号解析逻辑修正开始 >>>>>>>>>>>>>>>>>
-            # 优先从报文第一行直接解析，这是最可靠的方式
-            # 匹配格式如 (CPL-CES2782/A4011 或 (FPL-CSN6413-IS
             flight_no_match = re.search(r'^\(\w{3}-([A-Z0-9]+)', tele_body)
             if flight_no_match:
                 full_flight_no = flight_no_match.group(1).strip()
             else:
-                # 仅在报文格式异常时，回退到JSON数据
                 full_flight_no = f"{data.get('airlineIcaoCode', '')}{str(data.get('flightNo', '')).lstrip('0')}"
-            # <<<<<<<<<<<<<<< 航班号解析逻辑修正结束 >>>>>>>>>>>>>>>>>
 
             dep_icao = data.get('depAirportIcaoCode')
             arr_icao = None
@@ -125,18 +120,14 @@ def process_aftn_for_analysis(df, target_date):
             if msg_type == 'CPL':
                 arr_icao = data.get('actlArrAirportIcaoCode') or data.get('orgArrAirportIcaoCode') or data.get(
                     'arrAirportIcaoCode')
-
                 if not arr_icao:
                     arr_match = re.search(r'-\s*([A-Z]{4})\s*\n\s*(-PBN|-REG|-DOF|-EET|-SEL|-CODE|-RMK|\))', tele_body)
-                    if arr_match:
-                        arr_icao = arr_match.group(1)
-
+                    if arr_match: arr_icao = arr_match.group(1)
                 if not dep_icao:
                     lines = tele_body.splitlines()
                     if len(lines) > 2:
                         dep_match = re.search(r'-\s*([A-Z]{4})', lines[2])
-                        if dep_match:
-                            dep_icao = dep_match.group(1)
+                        if dep_match: dep_icao = dep_match.group(1)
             else:
                 arr_icao = data.get('arrAirportIcaoCode')
 
@@ -155,7 +146,6 @@ def process_aftn_for_analysis(df, target_date):
                 if craft_match: cpl_changes['New_CraftType'] = craft_match.group(1)
                 reg_match = re.search(r'REG/(\S+)', tele_body)
                 if reg_match: cpl_changes['New_RegNo'] = reg_match.group(1).strip(')')
-
                 cpl_changes['New_FlightNo'] = full_flight_no
                 cpl_changes['New_Destination'] = arr_icao
                 record.update(cpl_changes)
@@ -172,6 +162,10 @@ def process_aftn_for_analysis(df, target_date):
 
 
 def process_fpla_for_analysis(df, target_date):
+    """
+    修改后 (V4): 不再对任何输出进行去重，保留完整的消息历史。
+    plan_df 和 dynamic_df 将是同一个包含所有记录的DataFrame，只是列的选择不同。
+    """
     processed_records = []
     for index, row in df.iterrows():
         try:
@@ -200,21 +194,20 @@ def process_fpla_for_analysis(df, target_date):
     if not processed_records:
         return pd.DataFrame(), pd.DataFrame()
 
+    # 直接返回包含所有记录的DataFrame
     full_df = pd.DataFrame(processed_records)
-    latest_states_df = full_df.sort_values('ReceiveTime').groupby('FlightKey').last().reset_index()
 
-    plan_cols = ['FlightKey', 'ReceiveTime', 'FlightNo', 'RegNo', 'CraftType',
-                 'DepAirport', 'ArrAirport', 'SOBT', 'SIBT', 'Route']
-    dynamic_cols = ['FlightKey', 'ReceiveTime', 'FlightNo', 'RegNo', 'CraftType',
-                    'APTDEPAP', 'APTARRAP', 'APTSOBT', 'APTSIBT', 'FPLA_Status']
-
-    plan_df = latest_states_df.reindex(columns=plan_cols)
-    dynamic_df = latest_states_df.reindex(columns=dynamic_cols)
+    # 为了接口统一，我们仍然返回两个df，但它们都包含所有数据
+    plan_df = full_df.copy()
+    dynamic_df = full_df.copy()
 
     return plan_df, dynamic_df
 
 
 def process_fodc_for_analysis(df, target_date):
+    """
+    修改后 (V4): 不再对任何输出进行去重，保留完整的消息历史。
+    """
     plan_records = []
     dynamic_records = []
     df.columns = [str(col).strip() for col in df.columns]
@@ -250,10 +243,9 @@ def process_fodc_for_analysis(df, target_date):
         except Exception:
             continue
 
-    plan_df = pd.DataFrame(plan_records).sort_values('ReceiveTime').groupby(
-        'FlightKey').last().reset_index() if plan_records else pd.DataFrame()
-    dynamic_df = pd.DataFrame(dynamic_records).sort_values('ReceiveTime').groupby(
-        'FlightKey').last().reset_index() if dynamic_records else pd.DataFrame()
+    # 直接返回包含所有记录的DataFrame
+    plan_df = pd.DataFrame(plan_records) if plan_records else pd.DataFrame()
+    dynamic_df = pd.DataFrame(dynamic_records) if dynamic_records else pd.DataFrame()
 
     return plan_df, dynamic_df
 
