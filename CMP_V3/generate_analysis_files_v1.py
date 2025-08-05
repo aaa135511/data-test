@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 # ==============================================================================
-# --- 1. 配置加载 (保持不变) ---
+# --- 1. 配置加载 ---
 # ==============================================================================
 load_dotenv()
 TARGET_DATE_STR = os.getenv("TARGET_DATE")
@@ -37,7 +37,7 @@ except ValueError:
 
 
 # ==============================================================================
-# --- 2. 辅助函数 (保持不变) ---
+# --- 2. 辅助函数 ---
 # ==============================================================================
 def generate_flight_key(exec_date, flight_no, dep_icao, arr_icao):
     if not all([exec_date, flight_no, dep_icao, arr_icao]):
@@ -50,7 +50,7 @@ def generate_flight_key(exec_date, flight_no, dep_icao, arr_icao):
     return f"{exec_date.strftime('%Y-%m-%d')}_{flight_no}_{dep_icao}_{arr_icao}"
 
 
-def get_flight_date_from_aftn(data, tele_body, receive_time):
+def get_flight_date_from_aftn(tele_body, receive_time):
     dof_match = re.search(r'DOF/(\d{6})', tele_body)
     if dof_match:
         try:
@@ -65,15 +65,15 @@ def get_flight_date_from_aftn(data, tele_body, receive_time):
 def parse_core_business_info(body):
     changes = {}
     pattern = r'-\s*(\d{1,2})\s*/\s*(.*?)(?=\s*-\s*\d{1,2}\s*/|\)$)'
-    matches = re.findall(pattern, body)
+    matches = re.findall(pattern, body, re.DOTALL)
     for item_num_str, content_raw in matches:
         content = content_raw.strip().replace('\r\n', ' ').replace('\n', ' ')
         if item_num_str == '7':
             changes['New_FlightNo'] = content.split('/')[0].strip()
         elif item_num_str == '9':
             changes['New_CraftType'] = content.split('/')[0].strip()
-        elif item_num_str == '13' and len(content) >= 8:
-            changes['New_Departure_Time'] = content[-4:]
+        elif item_num_str == '13' and len(content.split()[0]) >= 8:
+            changes['New_Departure_Time'] = content.split()[0][-4:]
         elif item_num_str == '15':
             changes['New_Route'] = content
         elif item_num_str == '16':
@@ -84,79 +84,78 @@ def parse_core_business_info(body):
                 if len(parts) > 1: changes['New_Alternate_1'] = parts[1]
                 if len(parts) > 2: changes['New_Alternate_2'] = parts[2]
         elif item_num_str == '18':
-            if re.search(r'REG/(\S+)', content): changes['New_RegNo'] = re.search(r'REG/(\S+)', content).group(1)
+            if re.search(r'REG/(\S+)', content): changes['New_RegNo'] = re.search(r'REG/(\S+)', content).group(1).strip(
+                ')')
             if re.search(r'STS/(\S+)', content): changes['New_Mission_STS'] = re.search(r'STS/(\S+)', content).group(1)
     return changes
 
 
 # ==============================================================================
-# --- 3. 核心处理函数 (process_aftn_for_analysis 已最终修正) ---
+# --- 3. 核心处理函数 (已修正航班号和CPL解析逻辑) ---
 # ==============================================================================
 def process_aftn_for_analysis(df, target_date):
-    """【最终修正版】对 CPL 报文采用“完全替换”策略。"""
     processed_records = []
     for index, row in df.iterrows():
         try:
             data = json.loads(row.iloc[1])
-            tele_body = row.iloc[3]
+            tele_body = str(row.iloc[3])
             receive_time = pd.to_datetime(row.iloc[4], errors='coerce')
 
             msg_type = tele_body[1:4].strip()
             if msg_type in ['DEP', 'ARR']: continue
             if pd.isna(receive_time): continue
 
-            flight_date = get_flight_date_from_aftn(data, tele_body, receive_time)
+            flight_date = get_flight_date_from_aftn(tele_body, receive_time)
             if not flight_date or flight_date != target_date: continue
 
-            # flight_no_match = re.search(r'-\s*([A-Z0-9-]{3,10}?)\s*-', tele_body)
-            # full_flight_no = flight_no_match.group(
-            #     1).strip() if flight_no_match else f"{data.get('airlineIcaoCode', '')}{str(data.get('flightNo', '')).lstrip('0')}"
-
-            json_flight_no = f"{data.get('airlineIcaoCode', '')}{str(data.get('flightNo', '')).lstrip('0')}"
-
-            if json_flight_no and data.get('airlineIcaoCode') and data.get('flightNo'):
-                full_flight_no = json_flight_no
+            # <<<<<<<<<<<<<<< 航班号解析逻辑修正开始 >>>>>>>>>>>>>>>>>
+            # 优先从报文第一行直接解析，这是最可靠的方式
+            # 匹配格式如 (CPL-CES2782/A4011 或 (FPL-CSN6413-IS
+            flight_no_match = re.search(r'^\(\w{3}-([A-Z0-9]+)', tele_body)
+            if flight_no_match:
+                full_flight_no = flight_no_match.group(1).strip()
             else:
-                # 仅在Json信息不全时，才回退到正则提取
-                flight_no_match = re.search(r'-\s*([A-Z0-9-]{3,10}?)\s*-', tele_body)
-                full_flight_no = flight_no_match.group(1).strip() if flight_no_match else json_flight_no
+                # 仅在报文格式异常时，回退到JSON数据
+                full_flight_no = f"{data.get('airlineIcaoCode', '')}{str(data.get('flightNo', '')).lstrip('0')}"
+            # <<<<<<<<<<<<<<< 航班号解析逻辑修正结束 >>>>>>>>>>>>>>>>>
 
             dep_icao = data.get('depAirportIcaoCode')
-            arr_icao = data.get('arrAirportIcaoCode')
+            arr_icao = None
 
-            # --- 最终修正逻辑 ---
             if msg_type == 'CPL':
-                # 从报文体中解析基础信息，以备Json中缺失
-                body_dep_match = re.search(r'-\s*([A-Z]{4})[A-Z\s]*/\d{4}', tele_body) or re.search(
-                    r'-\s*([A-Z]{4})\d{4}', tele_body)
-                if not dep_icao and body_dep_match:
-                    dep_icao = body_dep_match.group(1)
+                arr_icao = data.get('actlArrAirportIcaoCode') or data.get('orgArrAirportIcaoCode') or data.get(
+                    'arrAirportIcaoCode')
 
-                body_arr_match = re.search(r'-([A-Z]{4})\s*-PBN', tele_body)  # 目的地机场通常在航路之后、其他信息之前
-                if not arr_icao and body_arr_match:
-                    arr_icao = body_arr_match.group(1)
+                if not arr_icao:
+                    arr_match = re.search(r'-\s*([A-Z]{4})\s*\n\s*(-PBN|-REG|-DOF|-EET|-SEL|-CODE|-RMK|\))', tele_body)
+                    if arr_match:
+                        arr_icao = arr_match.group(1)
+
+                if not dep_icao:
+                    lines = tele_body.splitlines()
+                    if len(lines) > 2:
+                        dep_match = re.search(r'-\s*([A-Z]{4})', lines[2])
+                        if dep_match:
+                            dep_icao = dep_match.group(1)
+            else:
+                arr_icao = data.get('arrAirportIcaoCode')
 
             record = {'ReceiveTime': receive_time, 'MessageType': msg_type, 'FlightNo': full_flight_no,
                       'RegNo': data.get('regNo'), 'DepAirport': dep_icao, 'ArrAirport': arr_icao,
                       'CraftType': data.get('aerocraftTypeIcaoCode'), 'RawMessage': tele_body}
 
-            # --- 策略调整 ---
             if msg_type == 'CHG':
-                change_details = parse_core_business_info(tele_body)
-                record.update(change_details)
+                record.update(parse_core_business_info(tele_body))
             elif msg_type == 'DLA':
                 dla_match = re.search(r'-\s*\w+\s*-\s*\w{4}(\d{4})', tele_body)
                 if dla_match: record['New_Departure_Time'] = dla_match.group(1)
             elif msg_type == 'CPL':
-                # 对于CPL，将基础信息视为“新”信息，用于全面对比
                 cpl_changes = {}
-                # 从报文中提取机型
-                craft_match = re.search(r'-\s*([A-Z0-9]{2,4})/[LMHJ]', tele_body)
+                craft_match = re.search(r'-\s*([A-Z0-9]{3,4})/[LMHJ]', tele_body)
                 if craft_match: cpl_changes['New_CraftType'] = craft_match.group(1)
-                # 从报文中提取机号
                 reg_match = re.search(r'REG/(\S+)', tele_body)
                 if reg_match: cpl_changes['New_RegNo'] = reg_match.group(1).strip(')')
-                # 将航班号、起降站也视为变更项
+
                 cpl_changes['New_FlightNo'] = full_flight_no
                 cpl_changes['New_Destination'] = arr_icao
                 record.update(cpl_changes)
@@ -180,43 +179,87 @@ def process_fpla_for_analysis(df, target_date):
             if len(sobt_str) < 8: continue
             flight_date = datetime.strptime(sobt_str[:8], "%Y%m%d").date()
             if flight_date != target_date: continue
+
+            flight_key = generate_flight_key(flight_date, row.get('CALLSIGN'), row.get('DEPAP'), row.get('ARRAP'))
+
             record = {
-                'FlightKey': generate_flight_key(flight_date, row.get('CALLSIGN'), row.get('DEPAP'), row.get('ARRAP')),
-                'ReceiveTime': row.get('SENDTIME'), 'FPLA_Status': row.get('PSCHEDULESTATUS'),
-                'FlightNo': row.get('CALLSIGN'), 'RegNo': row.get('EREGNUMBER') or row.get('REGNUMBER'),
-                'DepAirport': row.get('DEPAP'), 'ArrAirport': row.get('ARRAP'), 'SOBT': row.get('SOBT'),
-                'SIBT': row.get('SIBT'), 'APTSOBT': row.get('APTSOBT'), 'APTSIBT': row.get('APTSIBT'),
-                'Route': row.get('SROUTE'), 'MissionType': row.get('PMISSIONTYPE'),
-                'MissionProperty': row.get('PMISSIONPROPERTY'), 'CraftType': row.get('PSAIRCRAFTTYPE')}
+                'FlightKey': flight_key, 'ReceiveTime': row.get('SENDTIME'),
+                'FPLA_Status': row.get('PSCHEDULESTATUS'), 'FlightNo': row.get('CALLSIGN'),
+                'RegNo': row.get('EREGNUMBER') or row.get('REGNUMBER'),
+                'CraftType': row.get('PSAIRCRAFTTYPE'),
+                'SOBT': row.get('SOBT'), 'SIBT': row.get('SIBT'),
+                'DepAirport': row.get('DEPAP'), 'ArrAirport': row.get('ARRAP'),
+                'APTSOBT': row.get('APTSOBT'), 'APTSIBT': row.get('APTSIBT'),
+                'APTDEPAP': row.get('APTDEPAP'), 'APTARRAP': row.get('APTARRAP'),
+                'Route': row.get('SROUTE'),
+            }
             processed_records.append(record)
         except Exception:
             continue
-    return pd.DataFrame(processed_records)
+
+    if not processed_records:
+        return pd.DataFrame(), pd.DataFrame()
+
+    full_df = pd.DataFrame(processed_records)
+    latest_states_df = full_df.sort_values('ReceiveTime').groupby('FlightKey').last().reset_index()
+
+    plan_cols = ['FlightKey', 'ReceiveTime', 'FlightNo', 'RegNo', 'CraftType',
+                 'DepAirport', 'ArrAirport', 'SOBT', 'SIBT', 'Route']
+    dynamic_cols = ['FlightKey', 'ReceiveTime', 'FlightNo', 'RegNo', 'CraftType',
+                    'APTDEPAP', 'APTARRAP', 'APTSOBT', 'APTSIBT', 'FPLA_Status']
+
+    plan_df = latest_states_df.reindex(columns=plan_cols)
+    dynamic_df = latest_states_df.reindex(columns=dynamic_cols)
+
+    return plan_df, dynamic_df
 
 
 def process_fodc_for_analysis(df, target_date):
-    processed_records = []
+    plan_records = []
+    dynamic_records = []
     df.columns = [str(col).strip() for col in df.columns]
+
     for index, row in df.iterrows():
         try:
             sobt_str = str(row.get('计划离港时间')).split('.')[0]
             if pd.isna(sobt_str) or len(sobt_str) < 12: continue
             flight_date = datetime.strptime(sobt_str[:8], "%Y%m%d").date()
             if flight_date != target_date: continue
+
             flight_key = generate_flight_key(flight_date, row.get('航空器识别标志'), row.get('计划起飞机场'),
                                              row.get('计划降落机场'))
-            record = {'FlightKey': flight_key, 'ReceiveTime': row.get('消息发送时间'),
-                      'FlightNo': row.get('航空器识别标志'), 'RegNo': row.get('航空器注册号'),
-                      'DepAirport': row.get('计划起飞机场'), 'ArrAirport': row.get('计划降落机场'), 'SOBT': sobt_str,
-                      'CraftType': row.get('航空器机型'), 'FODC_ATOT': str(row.get('实际起飞时间')).split('.')[0]}
-            processed_records.append(record)
+
+            plan_record = {
+                'FlightKey': flight_key, 'ReceiveTime': row.get('消息发送时间'),
+                'FlightNo': row.get('航空器识别标志'), 'RegNo': row.get('航空器注册号'),
+                'DepAirport': row.get('计划起飞机场'), 'ArrAirport': row.get('计划降落机场'),
+                'SOBT': sobt_str, 'CraftType': row.get('航空器机型')
+            }
+            plan_records.append(plan_record)
+
+            if pd.notna(row.get('实际起飞时间')) or pd.notna(row.get('实际起飞机场')):
+                dynamic_record = {
+                    'FlightKey': flight_key, 'ReceiveTime': row.get('消息发送时间'),
+                    'FlightNo': row.get('航空器识别标志'), 'RegNo': row.get('航空器注册号'),
+                    'CraftType': row.get('航空器机型'),
+                    'DepAirport': row.get('实际起飞机场') or row.get('计划起飞机场'),
+                    'ArrAirport': row.get('实际降落机场') or row.get('计划降落机场'),
+                    'FODC_ATOT': str(row.get('实际起飞时间')).split('.')[0]
+                }
+                dynamic_records.append(dynamic_record)
         except Exception:
             continue
-    return pd.DataFrame(processed_records)
+
+    plan_df = pd.DataFrame(plan_records).sort_values('ReceiveTime').groupby(
+        'FlightKey').last().reset_index() if plan_records else pd.DataFrame()
+    dynamic_df = pd.DataFrame(dynamic_records).sort_values('ReceiveTime').groupby(
+        'FlightKey').last().reset_index() if dynamic_records else pd.DataFrame()
+
+    return plan_df, dynamic_df
 
 
 # ==============================================================================
-# --- 4. 主程序入口 (保持不变) ---
+# --- 4. 主程序入口 ---
 # ==============================================================================
 def main():
     try:
@@ -265,27 +308,52 @@ def main():
         print(f"--- 正在读取原始FPLA文件: {FPLA_XLSX_FILE} ---")
         fpla_raw_df = pd.read_excel(FPLA_XLSX_FILE)
         fpla_raw_df.rename(columns=FPLA_COLUMN_MAP, inplace=True)
-        fpla_df = process_fpla_for_analysis(fpla_raw_df, target_date_obj)
-        if not fpla_df.empty:
-            fpla_df.to_csv(os.path.join(PREPROCESSED_DIR, f'analysis_fpla_data_{TARGET_DATE_STR}.csv'), index=False,
-                           encoding='utf-8-sig')
-            print(f"√ FPLA分析文件已生成")
+
+        original_count = len(fpla_raw_df)
+        fpla_filtered_df = fpla_raw_df[fpla_raw_df['PSCHEDULESTATUS'] != 'CNL'].copy()
+        filtered_count = len(fpla_filtered_df)
+        print(f"FPLA数据过滤: 原始记录数 {original_count}, 过滤'CNL'状态后剩余 {filtered_count} 条记录。")
+
+        fpla_plan_df, fpla_dynamic_df = process_fpla_for_analysis(fpla_filtered_df, target_date_obj)
+
+        if not fpla_plan_df.empty:
+            fpla_plan_df.to_csv(os.path.join(PREPROCESSED_DIR, f'analysis_fpla_plan_data_{TARGET_DATE_STR}.csv'),
+                                index=False, encoding='utf-8-sig')
+            print(f"√ FPLA计划分析文件已生成")
         else:
-            print(f"警告: 在文件 {FPLA_XLSX_FILE} 中未找到指定日期的数据。")
+            print(f"警告: 在文件 {FPLA_XLSX_FILE} 中未找到指定日期的FPLA计划数据。")
+
+        if not fpla_dynamic_df.empty:
+            fpla_dynamic_df.to_csv(os.path.join(PREPROCESSED_DIR, f'analysis_fpla_dynamic_data_{TARGET_DATE_STR}.csv'),
+                                   index=False, encoding='utf-8-sig')
+            print(f"√ FPLA动态分析文件已生成")
+        else:
+            print(f"警告: 在文件 {FPLA_XLSX_FILE} 中未找到指定日期的FPLA动态数据。")
+
     except FileNotFoundError:
         print(f"错误: 原始FPLA文件 '{FPLA_XLSX_FILE}' 未找到。")
     except Exception as e:
         print(f"处理FPLA文件时发生错误: {e}")
+
     try:
         print(f"--- 正在读取原始FODC文件: {FODC_XLSX_FILE} ---")
         fodc_raw_df = pd.read_excel(FODC_XLSX_FILE, engine='openpyxl')
-        fodc_df = process_fodc_for_analysis(fodc_raw_df, target_date_obj)
-        if not fodc_df.empty:
-            output_path = os.path.join(PREPROCESSED_DIR, f'analysis_fodc_data_{TARGET_DATE_STR}.csv')
-            fodc_df.to_csv(output_path, index=False, encoding='utf-8-sig')
-            print(f"√ FODC分析文件已生成: {output_path}")
+        fodc_plan_df, fodc_dynamic_df = process_fodc_for_analysis(fodc_raw_df, target_date_obj)
+
+        if not fodc_plan_df.empty:
+            fodc_plan_df.to_csv(os.path.join(PREPROCESSED_DIR, f'analysis_fodc_plan_data_{TARGET_DATE_STR}.csv'),
+                                index=False, encoding='utf-8-sig')
+            print(f"√ FODC计划分析文件已生成")
         else:
-            print("警告: 未找到指定日期的FODC数据。")
+            print("警告: 未找到指定日期的FODC计划数据。")
+
+        if not fodc_dynamic_df.empty:
+            fodc_dynamic_df.to_csv(os.path.join(PREPROCESSED_DIR, f'analysis_fodc_dynamic_data_{TARGET_DATE_STR}.csv'),
+                                   index=False, encoding='utf-8-sig')
+            print(f"√ FODC动态分析文件已生成")
+        else:
+            print("警告: 未找到指定日期的FODC动态数据。")
+
     except FileNotFoundError:
         print(f"错误: 原始FODC文件 '{FODC_XLSX_FILE}' 未找到。")
     except Exception as e:

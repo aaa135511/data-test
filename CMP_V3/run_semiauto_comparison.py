@@ -8,7 +8,7 @@ import pandas as pd
 from dotenv import load_dotenv
 
 # ==============================================================================
-# --- 1. 配置加载 (保持不变) ---
+# --- 1. 配置加载 (已更新为新的文件结构) ---
 # ==============================================================================
 load_dotenv()
 TARGET_DATE_STR = os.getenv("TARGET_DATE")
@@ -19,9 +19,14 @@ if not TARGET_DATE_STR:
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PREPROCESSED_DIR = os.path.join(BASE_DIR, 'preprocessed_files')
 COMPARE_RESULT_DIR = os.path.join(BASE_DIR, 'compare_result')
+
+# 指向新的预处理文件
 AFTN_ANALYSIS_FILE = os.path.join(PREPROCESSED_DIR, f'analysis_aftn_data_{TARGET_DATE_STR}.csv')
-FPLA_ANALYSIS_FILE = os.path.join(PREPROCESSED_DIR, f'analysis_fpla_data_{TARGET_DATE_STR}.csv')
-FODC_ANALYSIS_FILE = os.path.join(PREPROCESSED_DIR, f'analysis_fodc_data_{TARGET_DATE_STR}.csv')
+FPLA_PLAN_FILE = os.path.join(PREPROCESSED_DIR, f'analysis_fpla_plan_data_{TARGET_DATE_STR}.csv')
+FPLA_DYNAMIC_FILE = os.path.join(PREPROCESSED_DIR, f'analysis_fpla_dynamic_data_{TARGET_DATE_STR}.csv')
+FODC_PLAN_FILE = os.path.join(PREPROCESSED_DIR, f'analysis_fodc_plan_data_{TARGET_DATE_STR}.csv')
+FODC_DYNAMIC_FILE = os.path.join(PREPROCESSED_DIR, f'analysis_fodc_dynamic_data_{TARGET_DATE_STR}.csv')
+
 PLAN_COMPARISON_FILE = os.path.join(COMPARE_RESULT_DIR, f'plan_comparison_report_{TARGET_DATE_STR}.xlsx')
 DYNAMIC_COMPARISON_FILE = os.path.join(COMPARE_RESULT_DIR, f'dynamic_comparison_report_{TARGET_DATE_STR}.xlsx')
 
@@ -54,7 +59,7 @@ def parse_fpla_time(time_val):
     try:
         time_str = str(time_val).split('.')[0]
         if '-' in time_str and ':' in time_str: return pd.to_datetime(time_str)
-        format_str = '%Y%m%d%H%M%S' if len(time_str) == 14 else '%Y%m%d%H%M'
+        format_str = '%Y%m%d%H%M%S' if len(time_str) >= 14 else '%Y%m%d%H%M'
         return pd.to_datetime(time_str, format=format_str, errors='coerce')
     except Exception:
         return pd.NaT
@@ -72,10 +77,10 @@ def safe_strip(val):
 
 
 # ==============================================================================
-# --- 3. 核心修正：run_plan_comparison 函数 ---
+# --- 3. 核心对比函数：计划对比 (已修改，使用新的plan文件，但保留原逻辑) ---
 # ==============================================================================
-def run_plan_comparison(aftn_df, fpla_df, fodc_df, target_date_obj):
-    """【AFTN基准版】遍历所有AFTN FPL报文，无论FPLA是否存在。"""
+def run_plan_comparison(aftn_df, fpla_plan_df, fodc_plan_df, target_date_obj):
+    """【AFTN基准版】遍历所有AFTN FPL报文，与FPLA和FODC的计划数据进行对比。"""
     print("--- 正在执行 [第一阶段]：最终计划状态快照对比 (AFTN为基准) ---")
     plan_results = []
 
@@ -85,21 +90,22 @@ def run_plan_comparison(aftn_df, fpla_df, fodc_df, target_date_obj):
     for flight_key in aftn_fpl_keys:
         aftn_fpls = aftn_df[(aftn_df['FlightKey'] == flight_key) & (aftn_df['MessageType'] == 'FPL')].sort_values(
             'ReceiveTime', ascending=False)
-        if aftn_fpls.empty: continue  # 理论上不会发生，但作为安全检查
+        if aftn_fpls.empty: continue
         latest_fpl = aftn_fpls.iloc[0]
 
         # 解析AFTN数据
-        fpl_time_match = re.search(r'-\w{4,10}(\d{4})\s', latest_fpl.get('RawMessage', ''))
+        fpl_time_match = re.search(r'-\s*\w{4,10}\s*(\d{4})', latest_fpl.get('RawMessage', ''))
         fpl_eobt_str = fpl_time_match.group(1) if fpl_time_match else np.nan
         dof_match = re.search(r'DOF/(\d{6})', latest_fpl.get('RawMessage', ''))
         base_date = datetime.strptime(f"20{dof_match.group(1)}", "%Y%m%d").date() if dof_match else target_date_obj
         aftn_sobt = convert_utc_str_to_bjt(fpl_eobt_str, base_date)
-        aftn_reg = safe_strip(latest_fpl.get('RegNo'))
+        # 从原始报文的18项中提取REG
+        aftn_reg_match = re.search(r'REG/(\S+)', latest_fpl.get('RawMessage', ''))
+        aftn_reg = safe_strip(aftn_reg_match.group(1).strip(')')) if aftn_reg_match else safe_strip(
+            latest_fpl.get('RegNo'))
 
-        # 尝试查找FPLA数据
-        fpla_plans = fpla_df[
-            (fpla_df['FlightKey'] == flight_key) & (fpla_df['FPLA_Status'].isin(['ADD', 'ALL', 'UPD']))].sort_values(
-            'ReceiveTime', ascending=False)
+        # 查找FPLA计划数据
+        fpla_plans = fpla_plan_df[fpla_plan_df['FlightKey'] == flight_key]
 
         fpla_sobt, fpla_reg = (None, None)
         if not fpla_plans.empty:
@@ -107,8 +113,8 @@ def run_plan_comparison(aftn_df, fpla_df, fodc_df, target_date_obj):
             fpla_sobt = parse_fpla_time(latest_fpla.get('SOBT'))
             fpla_reg = safe_strip(latest_fpla.get('RegNo'))
 
-        # 尝试查找FODC数据
-        fodc_records = fodc_df[fodc_df['FlightKey'] == flight_key].sort_values('ReceiveTime', ascending=False)
+        # 查找FODC计划数据
+        fodc_records = fodc_plan_df[fodc_plan_df['FlightKey'] == flight_key]
         fodc_sobt, fodc_reg = (None, None)
         if not fodc_records.empty:
             latest_fodc = fodc_records.iloc[0]
@@ -117,7 +123,8 @@ def run_plan_comparison(aftn_df, fpla_df, fodc_df, target_date_obj):
 
         # 构建结果行
         result_row = {
-            'FlightKey': flight_key, 'FPL_RegNo': aftn_reg,
+            'FlightKey': flight_key,
+            'FPL_RegNo': aftn_reg,
             'FPLA_RegNo': fpla_reg if fpla_reg is not None else '无FPLA数据',
             'FPL_SOBT_BJT': format_time(aftn_sobt),
             'FPLA_SOBT': format_time(fpla_sobt) if fpla_sobt is not None else '无FPLA数据',
@@ -125,12 +132,12 @@ def run_plan_comparison(aftn_df, fpla_df, fodc_df, target_date_obj):
             'FODC_SOBT': format_time(fodc_sobt) if fodc_sobt is not None else '无FODC数据'
         }
 
-        # 生成结论
-        if fpla_reg is None:  # 如果没有FPLA数据
+        # 生成结论 (保留您的原始详细逻辑)
+        if fpla_reg is None:
             result_row['AFTN_vs_FODC'] = 'N/A (无FPLA)'
             result_row['FPLA_vs_FODC'] = '无FPLA数据'
             result_row['Final_Conclusion'] = '无FPLA数据'
-        elif fodc_reg is not None:  # 如果有FPLA和FODC
+        elif fodc_reg is not None:
             aftn_vs_fodc_reg = "一致" if aftn_reg == fodc_reg else "不一致";
             fpla_vs_fodc_reg = "一致" if fpla_reg == fodc_reg else "不一致"
             aftn_vs_fodc_sobt = "一致" if format_time(aftn_sobt) == format_time(fodc_sobt) else "不一致";
@@ -153,7 +160,7 @@ def run_plan_comparison(aftn_df, fpla_df, fodc_df, target_date_obj):
                 else:
                     conclusions.append("时刻:三方不一致")
             result_row['Final_Conclusion'] = ", ".join(conclusions) if conclusions else "三方一致"
-        else:  # 如果有FPLA但没有FODC
+        else:
             result_row['AFTN_vs_FODC'] = '无FODC数据';
             result_row['FPLA_vs_FODC'] = '无FODC数据'
             if aftn_reg == fpla_reg and format_time(aftn_sobt) == format_time(fpla_sobt):
@@ -169,10 +176,10 @@ def run_plan_comparison(aftn_df, fpla_df, fodc_df, target_date_obj):
 
 
 # ==============================================================================
-# --- 4. 核心修正：run_dynamic_comparison 函数 ---
+# --- 4. 核心对比函数：动态对比 (已修改，使用新的dynamic文件，但保留原逻辑) ---
 # ==============================================================================
-def run_dynamic_comparison(aftn_df, fpla_df, fodc_df, target_date_obj):
-    """【AFTN基准版】遍历所有AFTN动态报文，无论FPLA是否存在。"""
+def run_dynamic_comparison(aftn_df, fpla_dynamic_df, fodc_dynamic_df, target_date_obj):
+    """【AFTN基准版】遍历所有AFTN动态报文，与FPLA和FODC的动态数据进行对比。"""
     print("--- 正在执行 [第二阶段]：动态变更事件溯源对比 (AFTN为基准) ---")
     dynamic_results = []
     aftn_dynamics = aftn_df[aftn_df['MessageType'].isin(['DLA', 'CHG', 'CPL'])].sort_values('ReceiveTime')
@@ -184,14 +191,14 @@ def run_dynamic_comparison(aftn_df, fpla_df, fodc_df, target_date_obj):
         aftn_event_time = aftn_row['ReceiveTime']
         msg_type = aftn_row['MessageType']
 
-        # 尝试查找FPLA和FODC数据
-        fpla_timeline = fpla_df[fpla_df['FlightKey'] == flight_key].sort_values('ReceiveTime')
-        fodc_timeline = fodc_df[fodc_df['FlightKey'] == flight_key].sort_values('ReceiveTime', ascending=False)
+        # 查找FPLA和FODC数据
+        fpla_timeline = fpla_dynamic_df[fpla_dynamic_df['FlightKey'] == flight_key].sort_values('ReceiveTime')
+        fodc_timeline = fodc_dynamic_df[fodc_dynamic_df['FlightKey'] == flight_key].sort_values('ReceiveTime',
+                                                                                                ascending=False)
 
         fpla_compare_state = fpla_timeline.iloc[-1] if not fpla_timeline.empty else None
         latest_fodc = fodc_timeline.iloc[0] if not fodc_timeline.empty else None
 
-        # 如果找不到对应的FPLA记录
         if fpla_compare_state is None:
             dynamic_results.append({
                 'FlightKey': flight_key, 'AFTN_Event_Time': aftn_event_time,
@@ -202,11 +209,12 @@ def run_dynamic_comparison(aftn_df, fpla_df, fodc_df, target_date_obj):
             })
             continue
 
-        # --- 以下是原有逻辑，现在可以安全执行，因为已确保 fpla_compare_state 存在 ---
+        # 保留您的原始详细对比逻辑
         if msg_type == 'DLA' or msg_type == 'CHG':
             change_found = False
             if pd.notna(aftn_row.get('New_Departure_Time')):
                 change_found = True;
+                # 使用保障计划时间（APT）进行对比
                 aftn_val = convert_utc_str_to_bjt(aftn_row.get('New_Departure_Time'), aftn_event_time.date());
                 fpla_val = parse_fpla_time(fpla_compare_state.get('APTSOBT'));
                 fodc_val = parse_fpla_time(latest_fodc.get('FODC_ATOT')) if latest_fodc is not None and pd.notna(
@@ -252,8 +260,9 @@ def run_dynamic_comparison(aftn_df, fpla_df, fodc_df, target_date_obj):
                                         'Conclusion': conclusion})
             if pd.notna(aftn_row.get('New_Destination')):
                 change_found = True;
+                # 使用保障计划机场进行对比
                 aftn_val = safe_strip(aftn_row.get('New_Destination'));
-                fpla_val = safe_strip(fpla_compare_state.get('ArrAirport'));
+                fpla_val = safe_strip(fpla_compare_state.get('APTARRAP'));
                 fodc_val = safe_strip(latest_fodc.get('ArrAirport')) if latest_fodc is not None else None;
                 conclusion = "无FODC标杆"
                 if fodc_val is not None:
@@ -270,8 +279,9 @@ def run_dynamic_comparison(aftn_df, fpla_df, fodc_df, target_date_obj):
                 dynamic_results.append({'FlightKey': flight_key, 'AFTN_Event_Time': aftn_event_time,
                                         'AFTN_Event_Type': f"{msg_type} (航站变更)",
                                         'AFTN_Change_Detail': f"New Dest: {aftn_val}",
-                                        'FPLA_Evidence': f"FPLA: {fpla_val}, FODC: {fodc_val}",
+                                        'FPLA_Evidence': f"FPLA APTARRAP: {fpla_val}, FODC: {fodc_val}",
                                         'Conclusion': conclusion})
+            # 其他字段对比... (保持不变)
             if pd.notna(aftn_row.get('New_CraftType')):
                 change_found = True;
                 aftn_val = safe_strip(aftn_row.get('New_CraftType'));
@@ -316,6 +326,7 @@ def run_dynamic_comparison(aftn_df, fpla_df, fodc_df, target_date_obj):
                                         'AFTN_Change_Detail': f"New FlightNo: {aftn_val}",
                                         'FPLA_Evidence': f"FPLA: {fpla_val}, FODC: {fodc_val}",
                                         'Conclusion': conclusion})
+
             if not change_found and msg_type == 'CHG':
                 dynamic_results.append({'FlightKey': flight_key, 'AFTN_Event_Time': aftn_event_time,
                                         'AFTN_Event_Type': f"{msg_type} (其他变更)",
@@ -326,7 +337,7 @@ def run_dynamic_comparison(aftn_df, fpla_df, fodc_df, target_date_obj):
             cpl_fields_to_compare = {'航班号变更': ('New_FlightNo', 'FlightNo', 'FlightNo'),
                                      '机型变更': ('New_CraftType', 'CraftType', 'CraftType'),
                                      '机号变更': ('New_RegNo', 'RegNo', 'RegNo'),
-                                     '航站变更': ('New_Destination', 'ArrAirport', 'ArrAirport')}
+                                     '航站变更': ('New_Destination', 'APTARRAP', 'ArrAirport')}  # CPL航站变更对比FPLA动态航站
             for change_type, (aftn_col, fpla_col, fodc_col) in cpl_fields_to_compare.items():
                 if pd.notna(aftn_row.get(aftn_col)):
                     aftn_val = safe_strip(aftn_row.get(aftn_col));
@@ -353,7 +364,7 @@ def run_dynamic_comparison(aftn_df, fpla_df, fodc_df, target_date_obj):
 
 
 # ==============================================================================
-# --- 5. 主程序入口 (保持不变) ---
+# --- 5. 主程序入口 (已修改为加载新文件) ---
 # ==============================================================================
 def main():
     if not TARGET_DATE_STR: print("错误: .env中未设置TARGET_DATE"); sys.exit(1)
@@ -362,25 +373,35 @@ def main():
     except ValueError:
         print(f"错误: 日期格式无效 ({TARGET_DATE_STR})");
         return
+
     print(f"\n===== 开始为日期 {TARGET_DATE_STR} 生成对比报告 =====")
     os.makedirs(COMPARE_RESULT_DIR, exist_ok=True)
+
     try:
+        # 加载所有五个预处理文件
         aftn_df = pd.read_csv(AFTN_ANALYSIS_FILE, low_memory=False)
-        fpla_df = pd.read_csv(FPLA_ANALYSIS_FILE, low_memory=False)
-        fodc_df = pd.read_csv(FODC_ANALYSIS_FILE, low_memory=False)
+        fpla_plan_df = pd.read_csv(FPLA_PLAN_FILE, low_memory=False)
+        fpla_dynamic_df = pd.read_csv(FPLA_DYNAMIC_FILE, low_memory=False)
+        fodc_plan_df = pd.read_csv(FODC_PLAN_FILE, low_memory=False)
+        fodc_dynamic_df = pd.read_csv(FODC_DYNAMIC_FILE, low_memory=False)
     except FileNotFoundError as e:
-        print(f"错误: 找不到预处理文件: {e}。请确保已成功运行 `generate_analysis_files.py`。");
+        print(f"错误: 找不到预处理文件: {e}。请确保已成功运行 `generate_analysis_files_v1.py`。");
         return
-    for df in [aftn_df, fpla_df, fodc_df]:
+
+    for df in [aftn_df, fpla_plan_df, fpla_dynamic_df, fodc_plan_df, fodc_dynamic_df]:
         if 'ReceiveTime' in df.columns:
             df['ReceiveTime'] = pd.to_datetime(df['ReceiveTime'], errors='coerce')
-    plan_report_df = run_plan_comparison(aftn_df, fpla_df, fodc_df, target_date_obj)
+
+    # 执行计划对比
+    plan_report_df = run_plan_comparison(aftn_df, fpla_plan_df, fodc_plan_df, target_date_obj)
     if not plan_report_df.empty:
         with pd.ExcelWriter(PLAN_COMPARISON_FILE, engine='xlsxwriter') as writer:
             plan_report_df.to_excel(writer, sheet_name='PlanComparison', index=False)
             auto_set_column_width(plan_report_df, writer, 'PlanComparison')
         print(f"\n√ [第一阶段] 最终计划对比报告已生成: {PLAN_COMPARISON_FILE}")
-    dynamic_report_df = run_dynamic_comparison(aftn_df, fpla_df, fodc_df, target_date_obj)
+
+    # 执行动态对比
+    dynamic_report_df = run_dynamic_comparison(aftn_df, fpla_dynamic_df, fodc_dynamic_df, target_date_obj)
     if not dynamic_report_df.empty:
         final_cols = ['FlightKey', 'AFTN_Event_Time', 'AFTN_Event_Type', 'AFTN_Change_Detail', 'FPLA_Evidence',
                       'Conclusion']
@@ -391,6 +412,7 @@ def main():
         print(f"√ [第二阶段] 动态变更溯源报告已生成: {DYNAMIC_COMPARISON_FILE}")
     else:
         print("\n[第二阶段] 未生成动态变更溯源报告，因为没有AFTN动态消息或相应FPLA数据。")
+
     print(f"\n===== 日期 {TARGET_DATE_STR} 的对比分析任务已完成 =====")
 
 
