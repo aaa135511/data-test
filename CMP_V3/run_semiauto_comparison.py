@@ -173,7 +173,7 @@ def run_plan_comparison(aftn_df, fpla_plan_df, fodc_plan_df, target_date_obj):
 
 
 # ==============================================================================
-# --- 4. 核心对比函数：动态对比 (已新增 FPLA_vs_AFTN_Status 列) ---
+# --- 4. 核心对比函数：动态对比 (已优化为 FPLA vs AFTN 和 FPLA vs FODC) ---
 # ==============================================================================
 def run_dynamic_comparison(aftn_df, fpla_dynamic_df, fodc_dynamic_df, target_date_obj):
     print("--- 正在执行 [第二阶段]：动态变更事件溯源对比 (AFTN为基准) ---")
@@ -198,156 +198,107 @@ def run_dynamic_comparison(aftn_df, fpla_dynamic_df, fodc_dynamic_df, target_dat
                 'AFTN_Event_Type': f"{msg_type} (无匹配)",
                 'AFTN_Change_Detail': 'N/A',
                 'FPLA_vs_AFTN_Status': '无FPLA数据',
-                'Evidence': '无FPLA数据',
-                'Conclusion': '无FPLA数据'
+                'FPLA_vs_FODC_Status': '无FPLA数据',
+                'Evidence': '无FPLA数据'
             })
             continue
 
         latest_fodc = fodc_timeline.iloc[0] if not fodc_timeline.empty else None
 
         def find_match_in_history(aftn_value, timeline_df, col_name, is_time=False):
-            if timeline_df is None or timeline_df.empty: return None, '无数据', False
+            if timeline_df is None or timeline_df.empty: return None, False
             for _, row in timeline_df.iterrows():
                 platform_val = row.get(col_name)
                 if is_time:
                     platform_val_formatted = format_time(parse_fpla_time(platform_val))
                     aftn_value_formatted = format_time(aftn_value)
-                    if platform_val_formatted == aftn_value_formatted: return platform_val_formatted, '匹配成功', True
+                    if platform_val_formatted == aftn_value_formatted: return platform_val_formatted, True
                 else:
                     platform_val_stripped = safe_strip(platform_val)
-                    if platform_val_stripped == safe_strip(aftn_value): return platform_val_stripped, '匹配成功', True
+                    if platform_val_stripped == safe_strip(aftn_value): return platform_val_stripped, True
             last_value = timeline_df.iloc[0].get(col_name)
-            return (format_time(parse_fpla_time(last_value)) if is_time else safe_strip(last_value)), '不匹配', False
+            return (format_time(parse_fpla_time(last_value)) if is_time else safe_strip(last_value)), False
+
+        def compare_with_fodc(fpla_val, fodc_latest, fodc_col, is_time=False):
+            if fodc_latest is None: return "无FODC标杆"
+            fodc_val = fodc_latest.get(fodc_col)
+            if pd.isna(fodc_val): return "无FODC数据"
+
+            if is_time:
+                fpla_formatted = format_time(parse_fpla_time(fpla_val))
+                fodc_formatted = format_time(parse_fpla_time(fodc_val))
+                return "一致" if fpla_formatted == fodc_formatted else "不一致"
+            else:
+                return "一致" if safe_strip(fpla_val) == safe_strip(fodc_val) else "不一致"
 
         if msg_type in ['DLA', 'CHG']:
             change_found = False
             if pd.notna(aftn_row.get('New_Departure_Time')):
                 change_found = True
                 aftn_val_dt = convert_utc_str_to_bjt(aftn_row.get('New_Departure_Time'), aftn_event_time.date())
-                fpla_matched_val, _, fpla_aftn_match_bool = find_match_in_history(aftn_val_dt, fpla_timeline, 'APTSOBT',
-                                                                                  is_time=True)
-                fodc_val = parse_fpla_time(latest_fodc.get('FODC_ATOT')) if latest_fodc is not None and pd.notna(
-                    latest_fodc.get('FODC_ATOT')) else None
-                conclusion = "无FODC(ATOT)标杆"
-                if fodc_val is not None:
-                    aftn_match = format_time(aftn_val_dt) == format_time(fodc_val)
-                    fpla_match = fpla_matched_val == format_time(fodc_val)
-                    if aftn_match and fpla_match:
-                        conclusion = "三方时刻一致"
-                    elif aftn_match:
-                        conclusion = "AFTN/FODC(ATOT)一致, FPLA不一致"
-                    elif fpla_match:
-                        conclusion = "FPLA/FODC(ATOT)一致, AFTN不一致"
-                    else:
-                        conclusion = f"三方不一致 (AFTN:{format_time(aftn_val_dt)}, FPLA:{fpla_matched_val}, FODC:{format_time(fodc_val)})"
+                fpla_matched_val, fpla_aftn_match_bool = find_match_in_history(aftn_val_dt, fpla_timeline, 'APTSOBT',
+                                                                               is_time=True)
+                fpla_fodc_status = compare_with_fodc(fpla_matched_val, latest_fodc, 'FODC_ATOT', is_time=True)
                 dynamic_results.append({'FlightKey': flight_key, 'AFTN_Event_Time': aftn_event_time,
                                         'AFTN_Event_Type': f"{msg_type} (时刻变更)",
                                         'AFTN_Change_Detail': f"新离港时刻: {format_time(aftn_val_dt)}",
                                         'FPLA_vs_AFTN_Status': "一致" if fpla_aftn_match_bool else "不一致",
-                                        'Evidence': f"FPLA保障时刻: {fpla_matched_val}, FODC实际起飞: {format_time(fodc_val)}",
-                                        'Conclusion': conclusion})
+                                        'FPLA_vs_FODC_Status': fpla_fodc_status,
+                                        'Evidence': f"FPLA保障时刻: {fpla_matched_val}, FODC实际起飞: {format_time(parse_fpla_time(latest_fodc.get('FODC_ATOT')) if latest_fodc is not None else None)}"})
 
             if pd.notna(aftn_row.get('New_RegNo')):
                 change_found = True
                 aftn_val = safe_strip(aftn_row.get('New_RegNo'))
-                fpla_matched_val, _, fpla_aftn_match_bool = find_match_in_history(aftn_val, fpla_timeline, 'RegNo')
-                fodc_val = safe_strip(latest_fodc.get('RegNo')) if latest_fodc is not None else None
-                conclusion = "无FODC标杆"
-                if fodc_val is not None:
-                    aftn_match = (aftn_val == fodc_val);
-                    fpla_match = (fpla_matched_val == fodc_val)
-                    if aftn_match and fpla_match:
-                        conclusion = "三方一致"
-                    elif aftn_match:
-                        conclusion = "AFTN/FODC一致, FPLA不一致"
-                    elif fpla_match:
-                        conclusion = "FPLA/FODC一致, AFTN不一致"
-                    else:
-                        conclusion = f"三方不一致 (AFTN:'{aftn_val}', FPLA:'{fpla_matched_val}', FODC:'{fodc_val}')"
+                fpla_matched_val, fpla_aftn_match_bool = find_match_in_history(aftn_val, fpla_timeline, 'RegNo')
+                fpla_fodc_status = compare_with_fodc(fpla_matched_val, latest_fodc, 'RegNo')
                 dynamic_results.append({'FlightKey': flight_key, 'AFTN_Event_Time': aftn_event_time,
                                         'AFTN_Event_Type': f"{msg_type} (机号变更)",
                                         'AFTN_Change_Detail': f"新机号: {aftn_val}",
                                         'FPLA_vs_AFTN_Status': "一致" if fpla_aftn_match_bool else "不一致",
-                                        'Evidence': f"FPLA机号: {fpla_matched_val}, FODC机号: {fodc_val}",
-                                        'Conclusion': conclusion})
+                                        'FPLA_vs_FODC_Status': fpla_fodc_status,
+                                        'Evidence': f"FPLA机号: {fpla_matched_val}, FODC机号: {safe_strip(latest_fodc.get('RegNo')) if latest_fodc is not None else None}"})
 
             if pd.notna(aftn_row.get('New_Destination')):
                 change_found = True
                 aftn_val = safe_strip(aftn_row.get('New_Destination'))
-                fpla_matched_val, _, fpla_aftn_match_bool = find_match_in_history(aftn_val, fpla_timeline, 'APTARRAP')
-                fodc_val = safe_strip(latest_fodc.get('ArrAirport')) if latest_fodc is not None else None
-                conclusion = "无FODC标杆"
-                if fodc_val is not None:
-                    aftn_match = (aftn_val == fodc_val);
-                    fpla_match = (fpla_matched_val == fodc_val)
-                    if aftn_match and fpla_match:
-                        conclusion = "三方一致"
-                    elif aftn_match:
-                        conclusion = "AFTN/FODC一致, FPLA不一致"
-                    elif fpla_match:
-                        conclusion = "FPLA/FODC一致, AFTN不一致"
-                    else:
-                        conclusion = f"三方不一致 (AFTN:'{aftn_val}', FPLA:'{fpla_matched_val}', FODC:'{fodc_val}')"
+                fpla_matched_val, fpla_aftn_match_bool = find_match_in_history(aftn_val, fpla_timeline, 'APTARRAP')
+                fpla_fodc_status = compare_with_fodc(fpla_matched_val, latest_fodc, 'ArrAirport')
                 dynamic_results.append({'FlightKey': flight_key, 'AFTN_Event_Time': aftn_event_time,
                                         'AFTN_Event_Type': f"{msg_type} (航站变更)",
                                         'AFTN_Change_Detail': f"新目的地: {aftn_val}",
                                         'FPLA_vs_AFTN_Status': "一致" if fpla_aftn_match_bool else "不一致",
-                                        'Evidence': f"FPLA保障目的地: {fpla_matched_val}, FODC目的地: {fodc_val}",
-                                        'Conclusion': conclusion})
+                                        'FPLA_vs_FODC_Status': fpla_fodc_status,
+                                        'Evidence': f"FPLA保障目的地: {fpla_matched_val}, FODC目的地: {safe_strip(latest_fodc.get('ArrAirport')) if latest_fodc is not None else None}"})
 
             if pd.notna(aftn_row.get('New_CraftType')):
                 change_found = True
                 aftn_val = safe_strip(aftn_row.get('New_CraftType'))
-                fpla_matched_val, _, fpla_aftn_match_bool = find_match_in_history(aftn_val, fpla_timeline, 'CraftType')
-                fodc_val = safe_strip(latest_fodc.get('CraftType')) if latest_fodc is not None else None
-                conclusion = "无FODC标杆"
-                if fodc_val is not None:
-                    aftn_match = (aftn_val == fodc_val);
-                    fpla_match = (fpla_matched_val == fodc_val)
-                    if aftn_match and fpla_match:
-                        conclusion = "三方一致"
-                    elif aftn_match:
-                        conclusion = "AFTN/FODC一致, FPLA不一致"
-                    elif fpla_match:
-                        conclusion = "FPLA/FODC一致, AFTN不一致"
-                    else:
-                        conclusion = f"三方不一致 (AFTN:'{aftn_val}', FPLA:'{fpla_matched_val}', FODC:'{fodc_val}')"
+                fpla_matched_val, fpla_aftn_match_bool = find_match_in_history(aftn_val, fpla_timeline, 'CraftType')
+                fpla_fodc_status = compare_with_fodc(fpla_matched_val, latest_fodc, 'CraftType')
                 dynamic_results.append({'FlightKey': flight_key, 'AFTN_Event_Time': aftn_event_time,
                                         'AFTN_Event_Type': f"{msg_type} (机型变更)",
                                         'AFTN_Change_Detail': f"新机型: {aftn_val}",
                                         'FPLA_vs_AFTN_Status': "一致" if fpla_aftn_match_bool else "不一致",
-                                        'Evidence': f"FPLA机型: {fpla_matched_val}, FODC机型: {fodc_val}",
-                                        'Conclusion': conclusion})
+                                        'FPLA_vs_FODC_Status': fpla_fodc_status,
+                                        'Evidence': f"FPLA机型: {fpla_matched_val}, FODC机型: {safe_strip(latest_fodc.get('CraftType')) if latest_fodc is not None else None}"})
 
             if pd.notna(aftn_row.get('New_FlightNo')):
                 change_found = True
                 aftn_val = safe_strip(aftn_row.get('New_FlightNo'))
-                fpla_matched_val, _, fpla_aftn_match_bool = find_match_in_history(aftn_val, fpla_timeline, 'FlightNo')
-                fodc_val = safe_strip(latest_fodc.get('FlightNo')) if latest_fodc is not None else None
-                conclusion = "无FODC标杆"
-                if fodc_val is not None:
-                    aftn_match = (aftn_val == fodc_val);
-                    fpla_match = (fpla_matched_val == fodc_val)
-                    if aftn_match and fpla_match:
-                        conclusion = "三方一致"
-                    elif aftn_match:
-                        conclusion = "AFTN/FODC一致, FPLA不一致"
-                    elif fpla_match:
-                        conclusion = "FPLA/FODC一致, AFTN不一致"
-                    else:
-                        conclusion = f"三方不一致 (AFTN:'{aftn_val}', FPLA:'{fpla_matched_val}', FODC:'{fodc_val}')"
+                fpla_matched_val, fpla_aftn_match_bool = find_match_in_history(aftn_val, fpla_timeline, 'FlightNo')
+                fpla_fodc_status = compare_with_fodc(fpla_matched_val, latest_fodc, 'FlightNo')
                 dynamic_results.append({'FlightKey': flight_key, 'AFTN_Event_Time': aftn_event_time,
                                         'AFTN_Event_Type': f"{msg_type} (航班号变更)",
                                         'AFTN_Change_Detail': f"新航班号: {aftn_val}",
                                         'FPLA_vs_AFTN_Status': "一致" if fpla_aftn_match_bool else "不一致",
-                                        'Evidence': f"FPLA航班号: {fpla_matched_val}, FODC航班号: {fodc_val}",
-                                        'Conclusion': conclusion})
+                                        'FPLA_vs_FODC_Status': fpla_fodc_status,
+                                        'Evidence': f"FPLA航班号: {fpla_matched_val}, FODC航班号: {safe_strip(latest_fodc.get('FlightNo')) if latest_fodc is not None else None}"})
 
             if not change_found and msg_type == 'CHG':
                 dynamic_results.append({'FlightKey': flight_key, 'AFTN_Event_Time': aftn_event_time,
                                         'AFTN_Event_Type': f"{msg_type} (其他变更)",
                                         'AFTN_Change_Detail': '未识别出核心字段变更', 'FPLA_vs_AFTN_Status': 'N/A',
-                                        'Evidence': 'N/A', 'Conclusion': '不影响地面保障，忽略对比'})
+                                        'FPLA_vs_FODC_Status': 'N/A', 'Evidence': 'N/A'})
 
         elif msg_type == 'CPL':
             cpl_fields_to_compare = {'航班号变更': ('New_FlightNo', 'FlightNo', 'FlightNo'),
@@ -357,32 +308,20 @@ def run_dynamic_comparison(aftn_df, fpla_dynamic_df, fodc_dynamic_df, target_dat
             for change_type, (aftn_col, fpla_col, fodc_col) in cpl_fields_to_compare.items():
                 if pd.notna(aftn_row.get(aftn_col)):
                     aftn_val = safe_strip(aftn_row.get(aftn_col))
-                    fpla_matched_val, _, fpla_aftn_match_bool = find_match_in_history(aftn_val, fpla_timeline, fpla_col)
-                    fodc_val = safe_strip(latest_fodc.get(fodc_col)) if latest_fodc is not None else None
-                    conclusion = "无FODC标杆"
-                    if fodc_val is not None:
-                        aftn_match = (aftn_val == fodc_val);
-                        fpla_match = (fpla_matched_val == fodc_val)
-                        if aftn_match and fpla_match:
-                            conclusion = "三方一致"
-                        elif aftn_match:
-                            conclusion = "AFTN/FODC一致, FPLA不一致"
-                        elif fpla_match:
-                            conclusion = "FPLA/FODC一致, AFTN不一致"
-                        else:
-                            conclusion = f"三方不一致 (AFTN:'{aftn_val}', FPLA:'{fpla_matched_val}', FODC:'{fodc_val}')"
+                    fpla_matched_val, fpla_aftn_match_bool = find_match_in_history(aftn_val, fpla_timeline, fpla_col)
+                    fpla_fodc_status = compare_with_fodc(fpla_matched_val, latest_fodc, fodc_col)
                     dynamic_results.append({'FlightKey': flight_key, 'AFTN_Event_Time': aftn_event_time,
                                             'AFTN_Event_Type': f"CPL ({change_type})",
                                             'AFTN_Change_Detail': f"新数据: {aftn_val}",
                                             'FPLA_vs_AFTN_Status': "一致" if fpla_aftn_match_bool else "不一致",
-                                            'Evidence': f"FPLA数据: {fpla_matched_val}, FODC数据: {fodc_val}",
-                                            'Conclusion': conclusion})
+                                            'FPLA_vs_FODC_Status': fpla_fodc_status,
+                                            'Evidence': f"FPLA数据: {fpla_matched_val}, FODC数据: {safe_strip(latest_fodc.get(fodc_col)) if latest_fodc is not None else None}"})
 
     df = pd.DataFrame(dynamic_results)
     if not df.empty:
         df.columns = [
             '航班标识(FlightKey)', 'AFTN事件时间(AFTN_Event_Time)', 'AFTN事件类型(AFTN_Event_Type)',
-            'AFTN变更明细(AFTN_Change_Detail)', 'FPLA vs AFTN 状态', '数据源佐证(Evidence)', '三方对比结论(Conclusion)'
+            'AFTN变更明细(AFTN_Change_Detail)', 'FPLA vs AFTN 状态', 'FPLA vs FODC 状态', '数据源佐证(Evidence)'
         ]
     return df
 
@@ -465,7 +404,7 @@ def calculate_accuracy(plan_report_df, dynamic_report_df):
 
     dyn_aftn_data = []
     for event, data in dyn_aftn_stats.items():
-        if data['total'] > 0:  # 只显示有事件发生的类型
+        if data.get('total', 0) > 0:  # 只显示有事件发生的类型
             dyn_aftn_data.append({'事件类型': event, '统计项': 'AFTN事件数', '数值': data['total']})
             dyn_aftn_data.append({'事件类型': event, '统计项': 'FPLA匹配数', '数值': data['matched']})
             if event == '总计':
@@ -480,22 +419,20 @@ def calculate_accuracy(plan_report_df, dynamic_report_df):
 
     # --- 动态-FPLA vs FODC ---
     dyn_fodc_stats = {}
-    fodc_present_df = dynamic_report_df[dynamic_report_df['数据源佐证(Evidence)'].str.contains('FODC', na=False)]
-    accurate_fodc_df = fodc_present_df[
-        fodc_present_df['三方对比结论(Conclusion)'].str.contains('FPLA/FODC一致|三方一致', na=False)]
+    fodc_present_df = dynamic_report_df[dynamic_report_df['FPLA vs FODC 状态'] != '无FODC标杆']
+    accurate_fodc_df = fodc_present_df[fodc_present_df['FPLA vs FODC 状态'] == '一致']
 
     dyn_fodc_stats['总计'] = {'base': len(fodc_present_df), 'accurate': len(accurate_fodc_df)}
 
     for event in ['时刻变更', '机号变更', '航站变更', '机型变更', '航班号变更']:
         event_df = fodc_present_df[fodc_present_df['AFTN事件类型(AFTN_Event_Type)'].str.contains(event, na=False)]
         if not event_df.empty:
-            accurate_event_df = event_df[
-                event_df['三方对比结论(Conclusion)'].str.contains('FPLA/FODC一致|三方一致', na=False)]
+            accurate_event_df = event_df[event_df['FPLA vs FODC 状态'] == '一致']
             dyn_fodc_stats[event] = {'base': len(event_df), 'accurate': len(accurate_event_df)}
 
     dyn_fodc_data = []
     for event, data in dyn_fodc_stats.items():
-        if data['base'] > 0:  # 只显示有标杆的事件类型
+        if data.get('base', 0) > 0:  # 只显示有标杆的事件类型
             dyn_fodc_data.append({'事件类型': event, '统计项': 'FODC存在标杆数', '数值': data['base']})
             if event == '总计':
                 dyn_fodc_data.append({'事件类型': event, '统计项': '综合准确事件数', '数值': data['accurate']})
