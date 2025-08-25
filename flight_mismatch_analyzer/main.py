@@ -4,7 +4,7 @@ import pymysql
 import pymysql.cursors
 from dotenv import load_dotenv
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 from collections import defaultdict
 
@@ -12,20 +12,129 @@ from collections import defaultdict
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
-# --- 1. 环境设置与数据加载 (No changes from previous version) ---
+# --- 1. 环境设置与数据加载 ---
 def load_and_filter_data(filepath):
+    """加载并筛选需要分析的航班数据。"""
     if not os.path.exists(filepath):
         logging.error(f"输入文件未找到: {filepath}")
         return None
     logging.info(f"正在从 {filepath} 加载数据...")
     df = pd.read_excel(filepath)
+    # 确保关键列存在
+    required_cols = ['实际起飞时间', '前序航班键', '实际执飞机号', '计划离港时间', '计划起飞机场', '航空器识别标志',
+                     '计划执行日期']
+    for col in required_cols:
+        if col not in df.columns:
+            logging.error(f"输入文件缺少必需的列: {col}")
+            return None
+
     df_filtered = df.dropna(subset=['实际起飞时间']).copy()
     df_mismatched = df_filtered[df_filtered['前序航班键'].isnull()].copy()
     logging.info(f"数据加载完成。共发现 {len(df_mismatched)} 条未匹配到前序的航班需要分析。")
     return df_mismatched
 
 
-# --- 2. 调用外部接口查询前序航班 (No changes from previous version) ---
+# --- 2. 数据库连接与查询工具 ---
+def get_db_connection():
+    """建立并返回一个MySQL数据库连接"""
+    try:
+        db_config = {
+            'host': '10.230.146.110', 'port': 3306, 'user': 'root',
+            'password': '101-FvlOP.pAjiWr6jFTdHt_698bdUgBAli_', 'database': 'data_core',
+            'charset': 'utf8mb4', 'cursorclass': pymysql.cursors.DictCursor
+        }
+        connection = pymysql.connect(**db_config)
+        logging.info("数据库连接成功。")
+        return connection
+    except pymysql.MySQLError as e:
+        logging.error(f"数据库连接失败: {e}")
+        return None
+
+
+def batch_query_fpla_for_regnumbers(connection, reg_numbers, report_date_str):
+    """根据机号列表，批量查询报告日及前一日的FPLA数据。"""
+    if not reg_numbers:
+        return []
+    logging.info(f"正在为 {len(reg_numbers)} 个机号批量查询FPLA源数据...")
+
+    report_date = datetime.strptime(report_date_str, '%Y%m%d')
+    prev_date_str = (report_date - timedelta(days=1)).strftime('%Y%m%d')
+
+    placeholders = ', '.join(['%s'] * len(reg_numbers))
+    sql = f"""
+        SELECT * FROM gxpt_aloi_fpla 
+        WHERE 
+            (REGNUMBER IN ({placeholders}) OR EREGNUMBER IN ({placeholders}))
+            AND (SOBT LIKE %s OR SOBT LIKE %s)
+    """
+    params = list(reg_numbers) * 2 + [f"{report_date_str}%", f"{prev_date_str}%"]
+
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(sql, params)
+            results = cursor.fetchall()
+            logging.info(f"FPLA源数据查询完毕，获取到 {len(results)} 条记录。")
+            return results
+    except pymysql.MySQLError as e:
+        logging.error(f"批量查询FPLA数据时出错: {e}")
+        return []
+
+
+def find_potential_preceding_in_fpla_data(current_flight_row, fpla_source_data):
+    """在内存中的FPLA数据里，为当前航班查找一个有效的潜在前序航班。"""
+    current_reg = current_flight_row.get('实际执飞机号')
+    current_dep_ap = current_flight_row.get('计划起飞机场')
+    current_sobt = str(int(current_flight_row.get('计划离港时间')))
+
+    if not all([current_reg, current_dep_ap, current_sobt]):
+        return None
+
+    # 寻找最接近当前航班起飞时间的前序航班
+    best_candidate = None
+    for candidate in fpla_source_data:
+        candidate_reg = candidate.get('REGNUMBER') or candidate.get('EREGNUMBER')
+        candidate_arr_ap = candidate.get('ARRAP')
+        candidate_sobt = candidate.get('SOBT')
+
+        if not all([candidate_reg, candidate_arr_ap, candidate_sobt]):
+            continue
+
+        if current_reg == candidate_reg and current_dep_ap == candidate_arr_ap and candidate_sobt < current_sobt:
+            if best_candidate is None or candidate_sobt > best_candidate['SOBT']:
+                best_candidate = candidate
+    return best_candidate
+
+
+def batch_query_aggregation_for_preceding(connection, preceding_flights_to_check):
+    """批量查询聚合表中是否存在指定的前序航班。"""
+    if not preceding_flights_to_check:
+        return set()
+
+    logging.info(f"正在聚合表中批量查询 {len(preceding_flights_to_check)} 个潜在前序航班的存在性...")
+    conditions, params = [], []
+    for callsign, sobt in preceding_flights_to_check:
+        exec_date = sobt[:8]
+        conditions.append("(callSign = %s AND sobt LIKE %s)")
+        params.extend([callsign, f"{exec_date}%"])
+
+    where_clause = " OR ".join(conditions)
+    sql = f"SELECT callSign, sobt FROM dsp_flight_aggregation WHERE {where_clause}"
+
+    found_flights = set()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(sql, params)
+            results = cursor.fetchall()
+            for res in results:
+                found_flights.add((res['callSign'], res['sobt']))
+        logging.info(f"聚合表查询完成，找到了 {len(found_flights)} 个匹配的记录。")
+        return found_flights
+    except pymysql.MySQLError as e:
+        logging.error(f"批量查询聚合表失败: {e}")
+        return set()
+
+
+# --- 3. API调用工具 (作为辅助验证) ---
 def format_time_for_api(time_val):
     if pd.isna(time_val): return None
     try:
@@ -44,7 +153,7 @@ def prepare_api_payload(df):
         if all([row.get('航空器识别标志'), row.get('计划起飞机场'), row.get('计划降落机场'), sobt_formatted,
                 sibt_formatted]):
             payload.append({
-                "callSign": row['航空器识别标志'], "regNumber": row.get('实际执行飞机号'),
+                "callSign": row['航空器识别标志'], "regNumber": row.get('实际执飞机号'),
                 "depAP": row['计划起飞机场'], "arrAP": row['计划降落机场'],
                 "sobt": sobt_formatted, "sibt": sibt_formatted
             })
@@ -53,150 +162,18 @@ def prepare_api_payload(df):
 
 def query_preceding_flight_api(payload):
     api_url = "http://10.230.146.110:8080/api/flight-leg/relationship/batch"
-    if not payload:
-        logging.warning("API请求体为空，跳过接口查询。")
-        return []
-    logging.info(f"正在向API发送 {len(payload)} 条航班的查询请求...")
+    if not payload: return []
+    logging.info(f"正在向API发送 {len(payload)} 条航班的查询请求以作辅助验证...")
     try:
         response = requests.post(api_url, json=payload, timeout=120)
         response.raise_for_status()
-        logging.info("API请求成功。")
         return response.json()
     except requests.exceptions.RequestException as e:
         logging.error(f"API请求失败: {e}")
         return []
 
 
-# --- 3. 数据库深度排查与分析 (REFACTORED FOR BATCHING) ---
-
-def get_db_connection():
-    """建立并返回一个MySQL数据库连接"""
-    try:
-        db_config = {
-            'host': '10.230.146.110', 'port': 3306, 'user': 'root',
-            'password': '101-FvlOP.pAjiWr6jFTdHt_698bdUgBAli_', 'database': 'data_core',
-            'charset': 'utf8mb4', 'cursorclass': pymysql.cursors.DictCursor
-        }
-        connection = pymysql.connect(**db_config)
-        logging.info("数据库连接成功。")
-        return connection
-    except pymysql.MySQLError as e:
-        logging.error(f"数据库连接失败: {e}")
-        return None
-
-
-def normalize_sobt_to_date_str(sobt):
-    """从不同格式的SOBT字段中提取YYYYMMDD格式的日期字符串"""
-    if isinstance(sobt, datetime):
-        return sobt.strftime('%Y%m%d')
-    if isinstance(sobt, str) and len(sobt) >= 8:
-        return sobt[:8]
-    return None
-
-
-def batch_investigate_flights_in_db(connection, flights_to_query):
-    """
-    在数据库中批量查询所有需要的航班信息，并按 (callsign, execute_date) 组织。
-    :param connection: 数据库连接对象
-    :param flights_to_query: 一个包含 (callsign, execute_date) 元组的集合
-    :return: 一个嵌套字典，结构为: {(callsign, date): {'FPLA': [...], 'FODC': [...]}, ...}
-    """
-    if not flights_to_query:
-        return {}
-
-    logging.info(f"准备从数据库批量查询 {len(flights_to_query)} 个唯一航班的数据...")
-
-    # 构建动态的WHERE IN子句
-    conditions = []
-    params = []
-    for callsign, exec_date in flights_to_query:
-        conditions.append("(CALLSIGN = %s AND SOBT LIKE %s)")
-        params.extend([callsign, f"{exec_date}%"])
-
-    where_clause = " OR ".join(conditions)
-
-    # 对于FLSC_FLIGHT，条件不同
-    flsc_conditions = []
-    flsc_params = []
-    for callsign, exec_date in flights_to_query:
-        flsc_conditions.append("(CALLSIGN = %s AND DATE(SOBT) = STR_TO_DATE(%s, '%%Y%%m%%d'))")
-        flsc_params.extend([callsign, exec_date])
-    flsc_where_clause = " OR ".join(flsc_conditions)
-
-    queries = {
-        "FPLA": (f"SELECT * FROM gxpt_aloi_fpla WHERE {where_clause}", params),
-        "FODC": (f"SELECT * FROM gxpt_osci_fodc WHERE {where_clause}", params),
-        "AGG": (f"SELECT * FROM dsp_flight_aggregation WHERE {where_clause}", params),
-        "FLSC_FLIGHT": (f"SELECT * FROM gxpt_osci_flsc_flight WHERE {flsc_where_clause}", flsc_params)
-    }
-
-    # 执行所有批量查询
-    raw_results = {}
-    try:
-        with connection.cursor() as cursor:
-            for name, (sql, query_params) in queries.items():
-                cursor.execute(sql, query_params)
-                raw_results[name] = cursor.fetchall()
-    except pymysql.MySQLError as e:
-        logging.error(f"批量数据库查询失败: {e}")
-        return {}
-
-    # 将平铺的结果组织成按航班标识的嵌套字典
-    organized_data = defaultdict(lambda: defaultdict(list))
-    for table_name, records in raw_results.items():
-        for record in records:
-            callsign = record.get('CALLSIGN') or record.get('callSign')
-            sobt = record.get('SOBT') or record.get('sobt')
-            exec_date = normalize_sobt_to_date_str(sobt)
-            if callsign and exec_date:
-                organized_data[(callsign, exec_date)][table_name].append(record)
-
-    logging.info("批量查询和数据组织完成。")
-    return organized_data
-
-
-def analyze_and_get_conclusion(flight_row, api_result, all_db_data):
-    """核心分析逻辑，使用预先获取的数据库数据进行分析"""
-    if 'previous' not in api_result or not api_result.get('previous'):
-        return "结论：接口未查询到前序航班信息，匹配失败属正常。"
-
-    preceding_flight = api_result['previous']
-    preceding_callsign = preceding_flight.get('callSign')
-
-    try:
-        preceding_sobt_dt = datetime.strptime(preceding_flight['sobt'], '%Y-%m-%d %H:%M:%S')
-        preceding_exec_date = preceding_sobt_dt.strftime('%Y%m%d')
-    except (ValueError, TypeError):
-        return f"结论：接口返回的前序航班({preceding_callsign})时间格式不正确。"
-
-    # 从预加载的数据中查找前序航班的记录
-    preceding_db_records = all_db_data.get((preceding_callsign, preceding_exec_date), {})
-
-    if not preceding_db_records.get('AGG'):
-        return f"数据问题：接口查到前序航班({preceding_callsign})，但该航班记录未在聚合表(dsp_flight_aggregation)中找到，导致无法关联。"
-
-    if not preceding_db_records.get('FODC'):
-        return f"数据问题：接口查到前序航班({preceding_callsign})，但核心实飞数据表(gxpt_osci_fodc)中无此记录，聚合可能因此失败。"
-
-    # 查找当前航班的数据库记录
-    current_callsign = flight_row['航空器识别标志']
-    current_exec_date = str(int(flight_row['计划执行日期']))
-    current_db_records = all_db_data.get((current_callsign, current_exec_date), {})
-
-    if not current_db_records.get('AGG'):
-        return f"数据问题：当前航班({current_callsign})自身记录在聚合表中缺失。"
-
-    current_reg = current_db_records['AGG'][0].get('regNumber')
-    preceding_reg = preceding_db_records['AGG'][0].get('regNumber')
-
-    if current_reg and preceding_reg and current_reg != preceding_reg:
-        return f"数据不一致：当前航班注册号({current_reg})与前序航班注册号({preceding_reg})在聚合表中不匹配。"
-
-    return "系统问题：接口能查到前序，且数据库中源数据和聚合数据基本齐全。问题可能出在航班环匹配程序的内部逻辑（如时间窗口、机场代码转换等）。"
-
-
 # --- 4. 主执行流程 ---
-
 def main():
     """主执行函数"""
     load_dotenv()
@@ -205,71 +182,101 @@ def main():
         logging.error("未在.env文件中设置REPORT_DATE，程序终止。")
         return
 
+    # --- 文件路径设置 ---
     start_date_str = f"{report_date}000000"
-    end_date_dt = datetime.strptime(report_date, '%Y%m%d') + pd.Timedelta(days=1)
+    end_date_dt = datetime.strptime(report_date, '%Y%m%d') + timedelta(days=1)
     end_date_str = end_date_dt.strftime('%Y%m%d%H%M%S')
-
     input_filename = f"Flight-Normality-Dynamic---{start_date_str}-{end_date_str}.xlsx"
     output_filename = f"Flight-Normality-Dynamic-Result---{report_date}.xlsx"
     input_path = os.path.join('input', input_filename)
     output_path = os.path.join('output', output_filename)
 
-    # 步骤1: 加载并筛选数据
+    # --- 步骤1: 加载并筛选数据 ---
     mismatched_df = load_and_filter_data(input_path)
     if mismatched_df is None or mismatched_df.empty:
         logging.info("没有需要处理的数据，程序结束。")
         return
 
-    # 步骤2: 调用API
-    api_payload = prepare_api_payload(mismatched_df)
-    api_results = query_preceding_flight_api(api_payload)
-    api_results_map = {f"{res['request']['callSign']}-{res['request']['depAP']}-{res['request']['sobt']}": res for res
-                       in api_results}
-
-    # 步骤3.1: 收集所有需要查询数据库的航班
-    flights_to_query_db = set()
-    for _, row in mismatched_df.iterrows():
-        flights_to_query_db.add((row['航空器识别标志'], str(int(row['计划执行日期']))))
-
-    for result in api_results:
-        if 'previous' in result and result.get('previous'):
-            pre_flight = result['previous']
-            try:
-                pre_sobt_dt = datetime.strptime(pre_flight['sobt'], '%Y-%m-%d %H:%M:%S')
-                pre_exec_date = pre_sobt_dt.strftime('%Y%m%d')
-                flights_to_query_db.add((pre_flight['callSign'], pre_exec_date))
-            except (ValueError, TypeError):
-                continue
-
-    # 步骤3.2: 批量查询数据库并组织数据
+    # --- 步骤2: 层级0 - 数据库源头存在性校验 ---
     db_conn = get_db_connection()
     if not db_conn: return
 
-    all_db_data = {}
+    all_conclusions = {}
+    flights_to_continue = []  # 存储 (index, found_preceding_flight)
+
     try:
-        all_db_data = batch_investigate_flights_in_db(db_conn, flights_to_query_db)
+        reg_numbers_to_query = mismatched_df['实际执飞机号'].dropna().unique()
+        fpla_source_data = batch_query_fpla_for_regnumbers(db_conn, list(reg_numbers_to_query), report_date)
+
+        logging.info("开始进行层级0 - 数据库源头存在性校验...")
+        for index, row in mismatched_df.iterrows():
+            potential_preceding = find_potential_preceding_in_fpla_data(row, fpla_source_data)
+            if potential_preceding is None:
+                all_conclusions[index] = "结论：数据库源头缺失有效的前序航班数据。匹配失败是由于上游FPLA数据不满足（机号、机场、时间）连续性条件。"
+            else:
+                flights_to_continue.append((index, potential_preceding))
     finally:
         db_conn.close()
         logging.info("数据库连接已关闭。")
 
-    # 步骤3.3: 逐条分析（使用内存中的数据）
-    conclusions = []
-    for _, row in mismatched_df.iterrows():
-        sobt_formatted = format_time_for_api(row['计划离港时间'])
-        lookup_key = f"{row['航空器识别标志']}-{row['计划起飞机场']}-{sobt_formatted}"
-        api_result = api_results_map.get(lookup_key)
+    logging.info(
+        f"层级0校验完成。{len(all_conclusions)} 条记录已确认问题。{len(flights_to_continue)} 条记录将进入下一层级分析。")
 
-        if not api_result:
-            conclusion = "结论：在API批量查询的返回结果中未找到此航班，可能请求失败或被过滤。"
-        else:
-            conclusion = analyze_and_get_conclusion(row, api_result, all_db_data)
-        conclusions.append(conclusion)
+    # --- 步骤3: 层级1 - 下游数据完整性校验 ---
+    flights_for_final_level = []  # 存储 index
+    if flights_to_continue:
+        preceding_to_check_in_agg = {(f['CALLSIGN'], f['SOBT']) for _, f in flights_to_continue}
 
-    # 步骤4: 输出结果
-    mismatched_df['分析结论'] = conclusions
+        db_conn = get_db_connection()
+        if not db_conn: return
+
+        try:
+            found_in_agg = batch_query_aggregation_for_preceding(db_conn, preceding_to_check_in_agg)
+
+            logging.info("开始进行层级1 - 下游数据完整性校验...")
+            for index, preceding_flight in flights_to_continue:
+                preceding_key = (preceding_flight['CALLSIGN'], preceding_flight['SOBT'])
+                if preceding_key not in found_in_agg:
+                    all_conclusions[
+                        index] = f"数据处理问题：在源头FPLA中找到了有效前序航班({preceding_key[0]}-{preceding_key[1]})，但该航班未能成功进入聚合表，导致匹配链断裂。"
+                else:
+                    flights_for_final_level.append(index)
+        finally:
+            db_conn.close()
+            logging.info("数据库连接已关闭。")
+
+    logging.info(
+        f"层级1校验完成。{len(flights_to_continue) - len(flights_for_final_level)} 条记录已确认问题。{len(flights_for_final_level)} 条记录将进入最终分析。")
+
+    # --- 步骤4: 层级2 - API交叉验证与最终结论 ---
+    if flights_for_final_level:
+        df_final_level = mismatched_df.loc[flights_for_final_level]
+        api_payload = prepare_api_payload(df_final_level)
+        api_results = query_preceding_flight_api(api_payload)
+        api_results_map = {f"{res['request']['callSign']}-{res['request']['depAP']}-{res['request']['sobt']}": res for
+                           res in api_results}
+
+        logging.info("开始进行层级2 - 最终结论生成...")
+        for index, row in df_final_level.iterrows():
+            base_conclusion = "系统问题：航班环匹配程序逻辑问题。原因：有效的源头数据存在，且已成功进入下游聚合表，但匹配程序未能将二者正确关联。"
+
+            # 附加API旁证信息
+            sobt_formatted = format_time_for_api(row['计划离港时间'])
+            lookup_key = f"{row['航空器识别标志']}-{row['计划起飞机场']}-{sobt_formatted}"
+            api_result = api_results_map.get(lookup_key)
+
+            if not api_result or 'previous' not in api_result or not api_result.get('previous'):
+                base_conclusion += " (备注：外部API也未能识别此关联，可能存在普遍的识别难点)"
+            else:
+                base_conclusion += " (备注：外部API可正确识别此关联，进一步印证为内部程序问题)"
+
+            all_conclusions[index] = base_conclusion
+
+    # --- 步骤5: 汇总与输出 ---
+    mismatched_df['分析结论'] = mismatched_df.index.map(all_conclusions)
     if not os.path.exists('output'): os.makedirs('output')
     mismatched_df.to_excel(output_path, index=False, engine='openpyxl')
-    logging.info(f"分析完成，包含结论的报告已保存至: {output_path}")
+    logging.info(f"全部分析完成，报告已保存至: {output_path}")
 
 
 if __name__ == "__main__":

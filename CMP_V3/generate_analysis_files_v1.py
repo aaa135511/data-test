@@ -19,7 +19,7 @@ if not TARGET_DATE_STR or not AIRPORT_ICAO:
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 RAW_DATA_DIR = os.path.join(BASE_DIR, 'raw_data')
-AFTN_CSV_FILE = os.path.join(RAW_DATA_DIR, 'sqlResult.csv')
+AFTN_CSV_FILE = os.path.join(RAW_DATA_DIR, 'sqlResult_8_25.csv')
 PREPROCESSED_DIR = os.path.join(BASE_DIR, 'preprocessed_files')
 
 try:
