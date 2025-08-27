@@ -26,7 +26,7 @@ FPLA_DYNAMIC_FILE = os.path.join(PREPROCESSED_DIR, f'analysis_fpla_dynamic_data_
 FODC_PLAN_FILE = os.path.join(PREPROCESSED_DIR, f'analysis_fodc_plan_data_{TARGET_DATE_STR}.csv')
 FODC_DYNAMIC_FILE = os.path.join(PREPROCESSED_DIR, f'analysis_fodc_dynamic_data_{TARGET_DATE_STR}.csv')
 
-OUTPUT_COMPARISON_FILE = os.path.join(COMPARE_RESULT_DIR, f'FPDI_Comparison_Report_{TARGET_DATE_STR}.xlsx')
+OUTPUT_COMPARISON_FILE = os.path.join(COMPARE_RESULT_DIR, f'西安对比结果_{TARGET_DATE_STR}.xlsx')
 
 
 # ==============================================================================
