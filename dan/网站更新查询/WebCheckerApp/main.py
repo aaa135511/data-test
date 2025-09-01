@@ -1,6 +1,6 @@
 # main.py
 # 这是一个包含了所有逻辑和GUI的完整文件，可以直接用于PyInstaller打包
-import multiprocessing
+# 版本 V20: 内存优化版 - 重用浏览器实例
 
 import pandas as pd
 import os
@@ -22,6 +22,7 @@ import urllib3
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext
 import threading
+import multiprocessing
 
 # ==============================================================================
 # 1. INITIAL CONFIGURATION & NETWORKING SETUP
@@ -88,27 +89,55 @@ def handle_yearless_date(date_str: str) -> str:
             return None
 
 
-def parse_html_for_articles(html_content: str, base_url: str, target_date: datetime.date):
+def parse_html_for_articles(html_content: str, base_url: str, target_date: datetime.date,
+                            key_keywords: list, exclude_keywords: list):
     soup = BeautifulSoup(html_content, 'lxml')
-    found_articles = {}
+    key_updates, other_updates = [], []
+    processed_urls = set()
+
+    def process_article(title, link_href, date_str):
+        if any(keyword in title for keyword in exclude_keywords if keyword):
+            return
+
+        final_date = None
+        try:
+            clean_date_str = date_str.strip('[]')
+            if re.search(r'\d{4}', clean_date_str):
+                final_date = parse_date(clean_date_str).date()
+            else:
+                processed_date_str = handle_yearless_date(clean_date_str)
+                if processed_date_str: final_date = datetime.strptime(processed_date_str, '%Y-%m-%d').date()
+
+            if final_date and final_date >= target_date:
+                absolute_url = urljoin(base_url, link_href)
+                if absolute_url in processed_urls: return
+                processed_urls.add(absolute_url)
+                article_data = {'title': title, 'date': final_date.strftime('%Y-%m-%d'), 'url': absolute_url}
+
+                if any(keyword in title for keyword in key_keywords if keyword):
+                    key_updates.append(article_data)
+                else:
+                    other_updates.append(article_data)
+        except (ParserError, ValueError):
+            pass
+
     main_content_area = soup.find('div', class_=re.compile(r'PicList|content2|zpgw_box|list_box', re.I))
     search_scope = main_content_area if main_content_area else soup
     containers = search_scope.find_all(['li', 'tr', 'dd', 'article'])
     if not containers:
         containers = search_scope.find_all('div', class_=re.compile(r'item|post|list|news|row|col', re.I))
+
     for item in containers:
         link_tag = item.find('a', href=True)
         if not link_tag: continue
+
         raw_title_text = link_tag.get_text(strip=True)
-        if '来源：' in raw_title_text:
-            title = raw_title_text.split('来源：')[0].strip()
-        elif '时间：' in raw_title_text:
-            title = raw_title_text.split('时间：')[0].strip()
-        else:
-            title_tag = link_tag.find(['h1', 'h2', 'h3', 'h4', 'div', 'p'],
-                                      class_=re.compile(r'title|list|name|text', re.I))
-            title = title_tag.get_text(strip=True) if title_tag else raw_title_text
+        title = raw_title_text.split('来源：')[0].split('时间：')[0].strip()
+        title_tag = link_tag.find(['h1', 'h2', 'h3', 'h4', 'div', 'p'],
+                                  class_=re.compile(r'title|list|name|text', re.I))
+        title = title_tag.get_text(strip=True) if title_tag and title_tag.get_text(strip=True) else title
         if len(title.split()) < 2 and len(title) < 8: continue
+
         date_str = None
         date_tag = item.find('time')
         if date_tag:
@@ -124,138 +153,63 @@ def parse_html_for_articles(html_content: str, base_url: str, target_date: datet
             match = DATE_REGEX.search(item_text)
             if match: date_str = match.group(0)
         if date_str:
-            final_date = None
-            try:
-                clean_date_str = date_str.strip('[]')
-                if re.search(r'\d{4}', clean_date_str):
-                    final_date = parse_date(clean_date_str).date()
-                else:
-                    processed_date_str = handle_yearless_date(clean_date_str)
-                    if processed_date_str: final_date = datetime.strptime(processed_date_str, '%Y-%m-%d').date()
-                if final_date and final_date >= target_date:
-                    absolute_url = urljoin(base_url, link_tag['href'])
-                    if absolute_url not in found_articles:
-                        found_articles[absolute_url] = {'title': title, 'date': final_date.strftime('%Y-%m-%d'),
-                                                        'url': absolute_url}
-            except (ParserError, ValueError):
-                continue
-    if not found_articles and len(containers) < 3:
-        main_title_tag = soup.find(['h1', 'h2'], class_=re.compile(r'title|headline', re.I)) or soup.find(['h1', 'h2'])
-        if main_title_tag:
-            title = main_title_tag.get_text(strip=True)
-            source_info = soup.find(lambda tag: ('来源' in tag.text or '时间' in tag.text) and len(tag.text) < 100)
-            page_text = source_info.get_text(strip=True) if source_info else soup.get_text(separator=' ', strip=True)
-            match = DATE_REGEX.search(page_text)
-            if match:
-                date_str = match.group(0)
-                final_date = None
-                try:
-                    clean_date_str = date_str.strip('[]')
-                    if re.search(r'\d{4}', clean_date_str):
-                        final_date = parse_date(clean_date_str).date()
-                    else:
-                        processed_date_str = handle_yearless_date(clean_date_str)
-                        if processed_date_str: final_date = datetime.strptime(processed_date_str, '%Y-%m-%d').date()
-                    if final_date and final_date >= target_date:
-                        found_articles[base_url] = {'title': title, 'date': final_date.strftime('%Y-%m-%d'),
-                                                    'url': base_url}
-                except (ParserError, ValueError):
-                    pass
-    return {'status': 'success', 'updates': list(found_articles.values())}
+            process_article(title, link_tag['href'], date_str)
+
+    return {'status': 'success', 'key_updates': key_updates, 'other_updates': other_updates}
 
 
-# --- 升级后的 find_updates_dynamic_selenium (V17) ---
-# 这个版本增加了 iframe 处理、页面滚动、更强的反检测和更详细的错误报告
-def find_updates_dynamic_selenium(base_url: str, target_date: datetime.date):
-    driver = None
+# --- 修改：函数不再创建和销毁driver，而是接收一个已存在的driver实例 ---
+def find_updates_dynamic_selenium(driver, base_url: str, target_date: datetime.date, key_keywords: list,
+                                  exclude_keywords: list):
     try:
-        options = uc.ChromeOptions()
-        options.add_argument('--headless=new')
-        options.add_argument('--disable-gpu')
-        options.add_argument('--log-level=3')
-        options.add_argument('--ignore-certificate-errors')
-        options.add_argument('--disable-blink-features=AutomationControlled')
-
-        # 增加一些额外的反检测参数
-        options.add_argument('--no-sandbox')
-        options.add_argument('--disable-dev-shm-usage')
-        options.add_argument(
-            'user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36')
-
-        driver = uc.Chrome(options=options)
-        driver.set_page_load_timeout(30)  # 设置页面加载超时
-
         driver.get(base_url)
-
-        # 等待页面基础元素加载
-        WebDriverWait(driver, 25).until(
-            EC.presence_of_element_located((By.TAG_NAME, "body"))
-        )
-        time.sleep(random.uniform(2, 4))  # 模仿人类阅读延迟
-
-        # 增加页面滚动，这对于触发动态加载（懒加载）的网站至关重要
+        WebDriverWait(driver, 25).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        time.sleep(random.uniform(2, 4))
         try:
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight/2);")
             time.sleep(random.uniform(1, 2))
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
             time.sleep(random.uniform(1, 2))
         except Exception:
-            pass  # 如果页面不允许滚动，就跳过
+            pass
 
         html_content = driver.page_source
+        initial_parse_result = parse_html_for_articles(html_content, base_url, target_date, key_keywords,
+                                                       exclude_keywords)
 
-        # 尝试处理 iframe
-        # 如果初始页面内容很少，且解析不到文章，就检查是否存在 iframe
-        initial_parse_result = parse_html_for_articles(html_content, base_url, target_date)
-        if not initial_parse_result['updates'] and len(html_content) < 20000:  # 20KB, 小于这个大小的页面很可疑
+        if not initial_parse_result['key_updates'] and not initial_parse_result['other_updates'] and len(
+            html_content) < 20000:
             iframes = driver.find_elements(By.TAG_NAME, 'iframe')
             if iframes:
-                print("  -> 检测到 iframe，正在切换...")
                 try:
                     driver.switch_to.frame(iframes[0])
-                    time.sleep(2)  # 等待 iframe 加载
-                    html_content = driver.page_source  # 获取 iframe 的源码
-                    driver.switch_to.default_content()  # 切回主页面
-                except Exception as e:
-                    print(f"  -> iframe 切换失败: {e}")
-                    pass  # 如果切换失败，继续使用原始 html
+                    time.sleep(2)
+                    html_content = driver.page_source
+                    driver.switch_to.default_content()
+                except Exception:
+                    pass
 
-        return parse_html_for_articles(html_content, base_url, target_date)
-
+        return parse_html_for_articles(html_content, base_url, target_date, key_keywords, exclude_keywords)
     except TimeoutException:
-        # 超时后，我们依然尽力去获取源码并解析
-        html_content = driver.page_source
-        if len(html_content) < 500:
-            return {'status': 'error', 'reason': "Selenium错误: 页面加载超时且内容为空"}
-        return parse_html_for_articles(html_content, base_url, target_date)
-
-    # 增强的错误捕获，提供更详细的错误信息
+        html_content = driver.page_source if driver else ""
+        if len(html_content) < 500: return {'status': 'error', 'reason': "Selenium错误: 页面加载超时且内容为空"}
+        return parse_html_for_articles(html_content, base_url, target_date, key_keywords, exclude_keywords)
     except Exception as e:
-        # 使用 type(e).__name__ 获取异常类型，str(e) 获取详细信息
         error_message = f"{type(e).__name__}: {str(e)}".strip()
         return {'status': 'error', 'reason': f"Selenium错误: {error_message}"}
-
-    finally:
-        if driver:
-            driver.quit()
+    # 注意：这里的 finally 块被移除了，因为driver的生命周期由上层函数管理
 
 
-def find_updates_static(base_url: str, target_date: datetime.date):
+def find_updates_static(base_url: str, target_date: datetime.date, key_keywords: list, exclude_keywords: list):
     session = requests.Session()
     session.mount('https://', Tls12Adapter())
     try:
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-        }
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'}
         response = session.get(base_url, headers=headers, timeout=15, verify=False)
         response.raise_for_status()
         response.encoding = response.apparent_encoding
-        return parse_html_for_articles(response.text, base_url, target_date)
+        return parse_html_for_articles(response.text, base_url, target_date, key_keywords, exclude_keywords)
     except requests.exceptions.RequestException as e:
         return {'status': 'error', 'reason': f"网络错误: {type(e).__name__}"}
 
@@ -273,11 +227,22 @@ def load_urls_from_excel(file_path):
 def generate_html_report(updated_sites, no_update_sites, error_sites, target_date_str, output_dir):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     report_filename = os.path.join(output_dir, f"网页更新报告-{datetime.now().strftime('%Y%m%d-%H%M%S')}.html")
+    key_sites_html, other_sites_html = [], []
+    for site in updated_sites:
+        if site['key_updates']:
+            key_sites_html.append(
+                f'''<div class="site-block"><div class="site-title">{site['name']}</div><div class="site-url"><a href="{site['url']}" target="_blank">{site['url']}</a></div><ul>{''.join([f'<li class="key-update-item"><span class="date">[{update["date"]}]</span> <a href="{update["url"]}" target="_blank">{update["title"]}</a></li>' for update in site["key_updates"]])}</ul></div>''')
+        if site['other_updates']:
+            other_sites_html.append(
+                f'''<div class="site-block"><div class="site-title">{site['name']}</div><div class="site-url"><a href="{site['url']}" target="_blank">{site['url']}</a></div><ul>{''.join([f'<li class="update-item"><span class="date">[{update["date"]}]</span> <a href="{update["url"]}" target="_blank">{update["title"]}</a></li>' for update in site["other_updates"]])}</ul></div>''')
+
+    total_updated_sites = len(updated_sites)
     html_template = f"""
-    <!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>网页更新检查报告</title><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;margin:0 auto;max-width:1000px;padding:20px;color:#333}}h1,h2{{color:#1a73e8;border-bottom:2px solid #e0e0e0;padding-bottom:10px}}.summary{{background-color:#f8f9fa;border-left:5px solid #1a73e8;padding:15px;margin:20px 0}}.site-block{{margin-bottom:25px;padding:15px;border:1px solid #ddd;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,0.05)}}.site-title{{font-size:1.2em;font-weight:bold;color:#202124}}.site-url{{font-size:0.9em;color:#5f6368;word-break:break-all}}ul{{list-style-type:none;padding-left:0}}li.update-item{{margin-top:10px;padding:10px;background-color:#f1f8e9;border-radius:5px}}li.no-update-item,li.error-item{{margin-top:5px;padding:5px;background-color:#f3f3f3;border-radius:5px}}.date{{font-weight:bold;color:#1e8e3e}}.error-reason{{color:#d93025;font-style:italic}}a{{color:#1a73e8;text-decoration:none}}a:hover{{text-decoration:underline}}</style></head><body>
-    <h1>网页更新检查报告</h1><div class="summary"><strong>报告生成时间:</strong> {now}<br><strong>监控起始日期:</strong> {target_date_str} 之后<br><strong>结果概要:</strong> <span style="color:#1e8e3e;">{len(updated_sites)}</span> 个网站有更新 | <span style="color:#5f6368;">{len(no_update_sites)}</span> 个无更新 | <span style="color:#d93025;">{len(error_sites)}</span> 个访问失败</div>
-    <h2>✅ 有更新的网站</h2>{''.join([f'''<div class="site-block"><div class="site-title">{site['name']}</div><div class="site-url"><a href="{site['url']}" target="_blank">{site['url']}</a></div><ul>{''.join([f'<li class="update-item"><span class="date">[{update["date"]}]</span> <a href="{update["url"]}" target="_blank">{update["title"]}</a></li>' for update in site["updates"]])}</ul></div>''' for site in updated_sites]) if updated_sites else "<p>本次没有检测到任何网站有更新。</p>"}
-    <h2>ℹ️ 无更新（或因强反爬机制需手动查看）的网站</h2><ul>{''.join([f'<li class="no-update-item"><span class="site-title">{site["name"]}</span> - <a href="{site["url"]}" target="_blank">{site["url"]}</a></li>' for site in no_update_sites]) if no_update_sites else "<p>所有网站均有更新或访问失败。</p>"}</ul>
+    <!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>网页更新检查报告</title><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;margin:0 auto;max-width:1000px;padding:20px;color:#333}}h1,h2{{color:#1a73e8;border-bottom:2px solid #e0e0e0;padding-bottom:10px}}h2.key-title{{color:#ff8f00}}h2.other-title{{color:#1e8e3e}}.summary{{background-color:#f8f9fa;border-left:5px solid #1a73e8;padding:15px;margin:20px 0}}.site-block{{margin-bottom:25px;padding:15px;border:1px solid #ddd;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,0.05)}}.site-title{{font-size:1.2em;font-weight:bold;color:#202124}}.site-url{{font-size:0.9em;color:#5f6368;word-break:break-all}}ul{{list-style-type:none;padding-left:0}}li.update-item{{margin-top:10px;padding:10px;background-color:#f1f8e9;border-radius:5px}}li.key-update-item{{margin-top:10px;padding:10px;background-color:#fff8e1;border-left:3px solid #ff8f00;border-radius:5px}}li.no-update-item,li.error-item{{margin-top:5px;padding:5px;background-color:#f3f3f3;border-radius:5px}}.date{{font-weight:bold;color:#1e8e3e}}.error-reason{{color:#d93025;font-style:italic}}a{{color:#1a73e8;text-decoration:none}}a:hover{{text-decoration:underline}}</style></head><body>
+    <h1>网页更新检查报告</h1><div class="summary"><strong>报告生成时间:</strong> {now}<br><strong>监控起始日期:</strong> {target_date_str} 之后<br><strong>结果概要:</strong> <span style="color:#1e8e3e;">{total_updated_sites}</span> 个网站有更新 | <span style="color:#5f6368;">{len(no_update_sites)}</span> 个无更新 | <span style="color:#d93025;">{len(error_sites)}</span> 个访问失败</div>
+    <h2 class="key-title">⭐ 重点关注更新</h2>{''.join(key_sites_html) if key_sites_html else "<p>本次没有检测到相关的重点更新。</p>"}
+    <h2 class="other-title">📄 其他更新</h2>{''.join(other_sites_html) if other_sites_html else "<p>本次没有检测到其他类型的更新。</p>"}
+    <h2>ℹ️ 无更新的网站</h2><ul>{''.join([f'<li class="no-update-item"><span class="site-title">{site["name"]}</span> - <a href="{site["url"]}" target="_blank">{site["url"]}</a></li>' for site in no_update_sites]) if no_update_sites else "<p>所有网站均有更新或访问失败。</p>"}</ul>
     <h2>❌ 无法访问的网站</h2><ul>{''.join([f'<li class="error-item"><span class="site-title">{site["name"]}</span> - {site["url"]}<br><span class="error-reason">原因: {site["reason"]}</span></li>' for site in error_sites]) if error_sites else "<p>所有网站均可正常访问。</p>"}</ul>
     </body></html>
     """
@@ -290,14 +255,17 @@ def generate_html_report(updated_sites, no_update_sites, error_sites, target_dat
 
 
 # ==============================================================================
-# 3. CORE EXECUTION FUNCTION (Called by GUI)
+# 3. CORE EXECUTION FUNCTION (MODIFIED FOR MEMORY OPTIMIZATION)
 # ==============================================================================
-def run_checker(excel_path, target_date_str, output_dir, status_callback):
-    status_callback("开始检查...")
-    sites_to_check = load_urls_from_excel(excel_path)
-    if isinstance(sites_to_check, dict) and 'error' in sites_to_check:
-        return {'error': sites_to_check['error']}
+def run_checker(excel_path, target_date_str, output_dir, status_callback, key_keywords_str, exclude_keywords_str):
+    key_list = [k.strip() for k in key_keywords_str.split(',') if k.strip()]
+    exclude_list = [k.strip() for k in exclude_keywords_str.split(',') if k.strip()]
 
+    status_callback("开始检查...")
+    status_callback(f"关键词: {key_list if key_list else '无'}")
+    status_callback(f"排除词: {exclude_list if exclude_list else '无'}")
+    sites_to_check = load_urls_from_excel(excel_path)
+    if isinstance(sites_to_check, dict) and 'error' in sites_to_check: return {'error': sites_to_check['error']}
     try:
         target_date = datetime.strptime(target_date_str, '%Y-%m-%d').date()
     except ValueError:
@@ -306,36 +274,69 @@ def run_checker(excel_path, target_date_str, output_dir, status_callback):
     status_callback(f"目标日期: >= {target_date_str}\n待检查网站: {len(sites_to_check)}")
     updated_sites, no_update_sites, error_sites = [], [], []
 
-    total_sites = len(sites_to_check)
-    for i, (name, url) in enumerate(sites_to_check):
-        status_callback(f"[{i + 1}/{total_sites}] 检查: {name} (快速模式)...")
-        result = find_updates_static(url, target_date)
+    # --- 核心修改：在这里统一管理driver的生命周期 ---
+    dynamic_driver = None
+    try:
+        total_sites = len(sites_to_check)
+        for i, (name, url) in enumerate(sites_to_check):
+            status_callback(f"[{i + 1}/{total_sites}] 检查: {name} (快速模式)...")
+            result = find_updates_static(url, target_date, key_list, exclude_list)
 
-        if result['status'] == 'error' or (result['status'] == 'success' and not result['updates']):
-            reason = result.get('reason', '未发现更新')
-            status_callback(f"  -> 快速模式失败({reason})，尝试动态模式...")
-            result = find_updates_dynamic_selenium(url, target_date)
+            is_static_empty = (
+                    result['status'] == 'success' and not result['key_updates'] and not result['other_updates'])
+            if result['status'] == 'error' or is_static_empty:
+                reason = result.get('reason', '未发现更新')
+                status_callback(f"  -> 快速模式失败({reason})，尝试动态模式...")
 
-        if result['status'] == 'success':
-            if result['updates']:
-                sorted_updates = sorted(result['updates'], key=lambda x: x['date'], reverse=True)
-                updated_sites.append({'name': name, 'url': url, 'updates': sorted_updates})
-                status_callback(f"  -> ✅ 发现 {len(sorted_updates)} 条更新！")
+                # --- 核心修改：只在第一次需要时才创建driver ---
+                if dynamic_driver is None:
+                    status_callback("  -> 正在初始化动态浏览器实例 (只需一次)...")
+                    options = uc.ChromeOptions()
+                    options.add_argument('--headless=new')
+                    options.add_argument('--disable-gpu')
+                    options.add_argument('--log-level=3')
+                    options.add_argument('--ignore-certificate-errors')
+                    options.add_argument('--disable-blink-features=AutomationControlled')
+                    options.add_argument('--no-sandbox')
+                    options.add_argument('--disable-dev-shm-usage')
+                    options.add_argument(
+                        'user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36')
+                    dynamic_driver = uc.Chrome(options=options)
+                    dynamic_driver.set_page_load_timeout(30)
+                    status_callback("  -> 动态浏览器已启动。")
+
+                # --- 核心修改：将已存在的driver实例传入函数 ---
+                result = find_updates_dynamic_selenium(dynamic_driver, url, target_date, key_list, exclude_list)
+
+            if result['status'] == 'success':
+                key_updates, other_updates = result.get('key_updates', []), result.get('other_updates', [])
+                if key_updates or other_updates:
+                    sorted_key = sorted(key_updates, key=lambda x: x['date'], reverse=True)
+                    sorted_other = sorted(other_updates, key=lambda x: x['date'], reverse=True)
+                    updated_sites.append(
+                        {'name': name, 'url': url, 'key_updates': sorted_key, 'other_updates': sorted_other})
+                    status_callback(f"  -> ✅ 发现 {len(sorted_key)} 条重点更新, {len(sorted_other)} 条其他更新！")
+                else:
+                    no_update_sites.append({'name': name, 'url': url})
+                    status_callback("  -> ℹ️ 未发现有效更新。")
             else:
-                no_update_sites.append({'name': name, 'url': url})
-                status_callback("  -> ℹ️ 未发现有效更新。")
-        else:
-            error_sites.append({'name': name, 'url': url, 'reason': result['reason']})
-            status_callback(f"  -> ❌ 访问失败: {result['reason']}")
+                error_sites.append({'name': name, 'url': url, 'reason': result['reason']})
+                status_callback(f"  -> ❌ 访问失败: {result['reason']}")
 
-        if i < total_sites - 1:
-            sleep_time = random.uniform(2, 5)
-            status_callback(f"--- (延时 {sleep_time:.1f} 秒) ---\n")
-            time.sleep(sleep_time)
+            if i < total_sites - 1:
+                sleep_time = random.uniform(2, 5)
+                status_callback(f"--- (延时 {sleep_time:.1f} 秒) ---\n")
+                time.sleep(sleep_time)
+
+    finally:
+        # --- 核心修改：在所有任务结束后，无论成功与否，都关闭driver ---
+        if dynamic_driver:
+            status_callback("正在关闭动态浏览器实例...")
+            dynamic_driver.quit()
+            status_callback("浏览器已关闭。")
 
     status_callback("正在生成HTML报告...")
     report_result = generate_html_report(updated_sites, no_update_sites, error_sites, target_date_str, output_dir)
-
     if report_result['success']:
         status_callback(f"报告生成成功！已保存至: {report_result['path']}")
         return {'success': True, 'path': report_result['path']}
@@ -350,12 +351,14 @@ def run_checker(excel_path, target_date_str, output_dir, status_callback):
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title("网页更新检查器 V17")
-        self.root.geometry("600x450")
+        self.root.title("网页更新检查器 V20 - 内存优化版")
+        self.root.geometry("600x550")
 
         self.excel_path = tk.StringVar()
         self.output_dir = tk.StringVar()
         self.target_date = tk.StringVar(value=date.today().strftime('%Y-%m-%d'))
+        self.key_keywords = tk.StringVar(value="招聘, 人才, 引进")
+        self.exclude_keywords = tk.StringVar(value="博士, 拟聘用, 高层次, 公示")
 
         main_frame = tk.Frame(root, padx=15, pady=15)
         main_frame.pack(fill=tk.BOTH, expand=True)
@@ -377,25 +380,32 @@ class App:
         output_btn = tk.Button(main_frame, text="选择...", command=self.select_output_dir)
         output_btn.grid(row=5, column=1, sticky="ew")
 
+        tk.Label(main_frame, text="4. 包含关键词 (用英文逗号 , 分隔):").grid(row=6, column=0, sticky="w", pady=(10, 5))
+        key_entry = tk.Entry(main_frame, textvariable=self.key_keywords)
+        key_entry.grid(row=7, column=0, columnspan=2, sticky="ew")
+
+        tk.Label(main_frame, text="5. 排除关键词 (用英文逗号 , 分隔):").grid(row=8, column=0, sticky="w", pady=(10, 5))
+        exclude_entry = tk.Entry(main_frame, textvariable=self.exclude_keywords)
+        exclude_entry.grid(row=9, column=0, columnspan=2, sticky="ew")
+
         self.run_button = tk.Button(main_frame, text="开始检查", bg="#4CAF50", fg="black",
                                     font=("Helvetica", 12, "bold"), command=self.start_checking)
-        self.run_button.grid(row=6, column=0, columnspan=2, pady=(20, 10), sticky="ew")
+        self.run_button.grid(row=10, column=0, columnspan=2, pady=(20, 10), sticky="ew")
 
-        tk.Label(main_frame, text="运行日志:").grid(row=7, column=0, sticky="w", pady=(10, 5))
+        tk.Label(main_frame, text="运行日志:").grid(row=11, column=0, sticky="w", pady=(10, 5))
         self.log_area = scrolledtext.ScrolledText(main_frame, height=10, state='disabled')
-        self.log_area.grid(row=8, column=0, columnspan=2, sticky="nsew")
+        self.log_area.grid(row=12, column=0, columnspan=2, sticky="nsew")
 
         main_frame.grid_columnconfigure(0, weight=1)
+        main_frame.grid_rowconfigure(12, weight=1)
 
     def select_excel(self):
         path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")])
-        if path:
-            self.excel_path.set(path)
+        if path: self.excel_path.set(path)
 
     def select_output_dir(self):
         path = filedialog.askdirectory()
-        if path:
-            self.output_dir.set(path)
+        if path: self.output_dir.set(path)
 
     def log(self, message):
         self.log_area.configure(state='normal')
@@ -405,24 +415,21 @@ class App:
         self.root.update_idletasks()
 
     def start_checking(self):
-        excel = self.excel_path.get()
-        target_d = self.target_date.get()
-        output = self.output_dir.get()
-
+        excel, target_d, output = self.excel_path.get(), self.target_date.get(), self.output_dir.get()
+        key_kws = self.key_keywords.get()
+        exclude_kws = self.exclude_keywords.get()
         if not all([excel, target_d, output]):
-            messagebox.showerror("错误", "所有选项均为必填项！")
+            messagebox.showerror("错误", "前三个选项均为必填项！")
             return
-
         self.run_button.config(text="正在运行...", state="disabled")
         self.log_area.configure(state='normal')
         self.log_area.delete(1.0, tk.END)
         self.log_area.configure(state='disabled')
-
-        thread = threading.Thread(target=self.run_checker_thread, args=(excel, target_d, output))
+        thread = threading.Thread(target=self.run_checker_thread, args=(excel, target_d, output, key_kws, exclude_kws))
         thread.start()
 
-    def run_checker_thread(self, excel, target_d, output):
-        result = run_checker(excel, target_d, output, self.log)
+    def run_checker_thread(self, excel, target_d, output, key_kws, exclude_kws):
+        result = run_checker(excel, target_d, output, self.log, key_kws, exclude_kws)
         self.root.after(0, self.on_checking_complete, result)
 
     def on_checking_complete(self, result):
@@ -431,8 +438,13 @@ class App:
         elif 'success' in result:
             messagebox.showinfo("完成", f"报告已成功生成！\n路径: {result['path']}")
             if os.path.exists(result['path']):
-                os.system(f'open "{os.path.dirname(result["path"])}"')
-
+                try:
+                    if os.name == 'nt':
+                        os.startfile(os.path.dirname(result['path']))
+                    elif os.uname().sysname == 'Darwin':
+                        os.system(f'open "{os.path.dirname(result["path"])}"')
+                except Exception as e:
+                    self.log(f"无法自动打开文件夹: {e}")
         self.run_button.config(text="开始检查", state="normal")
 
 
@@ -441,7 +453,6 @@ class App:
 # ==============================================================================
 if __name__ == "__main__":
     multiprocessing.freeze_support()
-
     root = tk.Tk()
     app = App(root)
     root.mainloop()
