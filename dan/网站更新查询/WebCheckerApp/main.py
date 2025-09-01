@@ -1,5 +1,6 @@
 # main.py
 # 这是一个包含了所有逻辑和GUI的完整文件，可以直接用于PyInstaller打包
+import multiprocessing
 
 import pandas as pd
 import os
@@ -439,6 +440,8 @@ class App:
 # 5. APPLICATION ENTRY POINT
 # ==============================================================================
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
+
     root = tk.Tk()
     app = App(root)
     root.mainloop()
