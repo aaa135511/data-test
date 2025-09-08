@@ -5,10 +5,10 @@ import re  # 导入正则表达式模块
 
 # --- 用户配置 ---
 # 您现在只需要配置下面两个变量
-EXCEL_FILE_PATH = 'FPDI明细—2025-08-26T00_00-2025-08-27T00_00.xlsx'  # <-- 修改为您的输入Excel文件名
+EXCEL_FILE_PATH = 'FPDI明细—2025-09-03T00_00-2025-09-04T00_00.xlsx'  # <-- 修改为您的输入Excel文件名
 TARGET_AIRPORT = 'ZUTF'  # <-- 修改为您要分析的目标降落机场
 
-# --- 字段定义 ---
+# --- 字段定义 ---`
 # (此部分保持不变)
 CUSTOM_FIELD_STATUS = {
     "航空器识别标志": "是", "GUFI": "否", "UnitUFI": "是",

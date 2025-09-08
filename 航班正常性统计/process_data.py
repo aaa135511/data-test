@@ -1,5 +1,7 @@
 import os
 import json
+from datetime import timedelta, datetime
+
 from dotenv import load_dotenv
 import openpyxl
 from openpyxl.styles import Font
@@ -43,7 +45,17 @@ def main():
         print("错误: 未在 .env 文件中找到 'DATE' 配置。")
         return
 
-    input_filename = f'Airport-Normal-{date_str}000000-{int(date_str) + 1}000000.xlsx'
+    date_obj = datetime.strptime(date_str, '%Y%m%d')
+
+    # 计算下一天的日期
+    next_day_obj = date_obj + timedelta(days=1)
+    next_day_str = next_day_obj.strftime('%Y%m%d')
+
+    # 构造正确的文件名
+    input_filename = f'Airport-Normal-{date_str}000000-{next_day_str}000000.xlsx'
+    print(input_filename)
+    # 输出: Airport-Normal-20250831000000-20250901000000.xlsx
+
     json_filename = f'competitor_data_{date_str}.json'
 
     input_filepath = os.path.join('input', input_filename)
