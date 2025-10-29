@@ -7,8 +7,8 @@ warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 
 def analyze_flight_data():
     """
-    分析指定日期的航班计划与实际执行情况，并将监控周期向后延长。
-    【边界修正】确保计划时间恰好在午夜24:00点的航班被正确统计。
+    分析指定日期的航班计划与实际执行情况。
+    【已恢复】分析周期仅为指定日期当天的00:00至24:00。
     """
     # --- 1. 配置参数 ---
     FPLA_FILE = '23-fpla.xlsx'
@@ -16,8 +16,7 @@ def analyze_flight_data():
     AIRPORT_CODE = 'ZGGG'
     ANALYSIS_DATE_STR = '2025-09-23'
 
-    EXTENSION_HOURS = 24
-    OUTPUT_FILE = f'航班掌握情况分析结果_最终修正版_延长{EXTENSION_HOURS}小时.xlsx'
+    OUTPUT_FILE = '航班掌握情况分析结果_仅23日当天_用于核对.xlsx'
 
     # --- 2. 数据加载与预处理 ---
     try:
@@ -32,7 +31,7 @@ def analyze_flight_data():
     fodc_df.columns = [col.upper() for col in fodc_df.columns]
 
     # 过滤FODC中的外航
-    foreign_airline_regex = '^(AAR|AIH|AIQ|ALK|ANA|ATC|AXM|BBC|BDJ|CAL|CAO|CNW|CPA|CSG|ETH|FDX|GFA|GTI|HVN|JAL|KAL|KME|KHV|LAO|MAS|MFX|MMA|MSR|MXD|MZT|QNT|QTR|RMY|SIA|SVA|T7RDJ|TAG|TGW|THA|THY|TLM|TNU|TXJ|UAE|VJC|VPCKG)'
+    foreign_airline_regex = '^(AAR|AIH|AIQ|ALK|ANA|ATC|AXM|BBC|BDJ|CAL|CNW|CPA|CSG|ETH|FDX|GFA|GTI|HVN|JAL|KAL|KME|KHV|LAO|MAS|MFX|MMA|MSR|MXD|MZT|QNT|QTR|RMY|SIA|SVA|T7RDJ|TAG|TGW|THA|THY|TLM|TNU|TXJ|UAE|VJC|VPCKG)'
     fodc_df['CALLSIGN'] = fodc_df['CALLSIGN'].astype(str).fillna('')
     fodc_df = fodc_df[~fodc_df['CALLSIGN'].str.match(foreign_airline_regex)]
 
@@ -54,11 +53,11 @@ def analyze_flight_data():
     # --- 3. 按小时进行迭代分析 ---
     results = []
     analysis_date = pd.to_datetime(ANALYSIS_DATE_STR)
-    total_analysis_points = 25 + EXTENSION_HOURS
 
-    print(f"开始进行航班情况分析，总计 {total_analysis_points - 1} 个小时的监控周期...")
+    # 【关键修改】循环恢复为25个节点 (00:00 to 24:00)
+    print("开始进行航班情况分析，分析周期为当天00:00至24:00...")
 
-    for hour in range(total_analysis_points):
+    for hour in range(25):
         current_node_time = analysis_date + pd.Timedelta(hours=hour)
         plan_day_start = analysis_date
         plan_day_end = analysis_date + pd.Timedelta(days=1)
@@ -67,7 +66,6 @@ def analyze_flight_data():
         fpla_known_at_node = fpla_df[fpla_df['MSG_TIME'] <= current_node_time].copy()
         fpla_latest = fpla_known_at_node.sort_values('MSG_TIME').drop_duplicates('FLIGHTKEY', keep='last')
 
-        # 【关键修正】将当天计划的时间范围从 [start, end) 改为 [start, end]，即包含24:00点
         is_departure = (fpla_latest['DEPAP'] == AIRPORT_CODE) & (fpla_latest['SOBT'] >= plan_day_start) & (
                 fpla_latest['SOBT'] <= plan_day_end)
         is_arrival = (fpla_latest['ARRAP'] == AIRPORT_CODE) & (fpla_latest['SIBT'] >= plan_day_start) & (
@@ -98,7 +96,7 @@ def analyze_flight_data():
         pending_exec = total_plan_exec - total_actual_exec
 
         node_time_str = current_node_time.strftime('%Y-%m-%d %H:%M:%S')
-        if hour == 24 and current_node_time.hour == 0:
+        if hour == 24:
             node_time_str = f"{ANALYSIS_DATE_STR} 24:00:00"
 
         results.append({
@@ -126,8 +124,8 @@ def analyze_flight_data():
 
     result_df.to_excel(OUTPUT_FILE, index=False)
     print(f"\n分析完成！结果已保存至文件：{OUTPUT_FILE}")
-    print("\n最终结果预览 (24:00点附近)：")
-    print(result_df.iloc[23:27].to_string(index=False))
+    print("\n最终结果预览 (全天)：")
+    print(result_df.to_string(index=False))
 
 
 if __name__ == '__main__':
