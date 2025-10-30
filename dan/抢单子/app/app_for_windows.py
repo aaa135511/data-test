@@ -7,10 +7,12 @@ import threading
 import time
 import json
 import os
+import subprocess  # 【调试】引入 subprocess 模块来直接调用外部命令
 
 
-# --- 配置文件管理器 (跨平台，无需修改) ---
+# --- 配置文件管理器 (无变化) ---
 class ConfigManager:
+    # ... (这部分代码与之前完全相同，为节省篇幅此处省略) ...
     def __init__(self):
         self.config_dir = os.path.join(os.path.expanduser("~"), ".auto_order_accepter")
         self.config_path = os.path.join(self.config_dir, "config.json")
@@ -43,21 +45,20 @@ class ConfigManager:
             return False
 
 
-# --- 主应用 GUI ---
+# --- 主应用 GUI (无变化) ---
 class App(tk.Tk):
+    # ... (这部分代码与之前完全相同，为节省篇幅此处省略) ...
     def __init__(self):
         super().__init__()
-        self.title("自动接单助手 (Windows版)")
+        self.title("自动接单助手 (Windows版 - 调试模式)")
         self.geometry("420x450")
         self.attributes('-topmost', True)
-
         self.config_manager = ConfigManager()
         self.entries = {}
         self.automation_thread = None
         self.is_running = False
         self.show_coords = False
         self.last_ocr_text = ""
-
         self.create_widgets()
         self.load_settings()
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -165,6 +166,7 @@ class App(tk.Tk):
         self.destroy()
 
     def _automation_loop(self):
+        # ... (这部分代码与之前完全相同，为节省篇幅此处省略) ...
         cfg = self.current_config
         monitor_region = (
             int(cfg['monitor_x1']), int(cfg['monitor_y1']),
@@ -175,14 +177,12 @@ class App(tk.Tk):
             self.after(0, lambda: messagebox.showerror("错误", "监控区域的右下角坐标必须大于左上角坐标！"))
             self.after(0, self.stop_automation)
             return
-
         print("--- 自动化流程已启动 ---")
         self.last_ocr_text = ""
         while self.is_running:
             try:
                 screenshot = pyautogui.screenshot(region=monitor_region)
                 text = pytesseract.image_to_string(screenshot, lang='chi_sim').strip()
-
                 is_new_order = False
                 if "故障派单通知" in text:
                     if self.last_ocr_text == "" or text != self.last_ocr_text:
@@ -192,49 +192,100 @@ class App(tk.Tk):
                         print("内容与上次相同，判定为旧通知，跳过。")
                 else:
                     print(f"未发现'故障派单通知'关键字。识别内容: '{text}'")
-
                 if is_new_order:
                     self.last_ocr_text = text
                     print("[成功] 判定为新派单，执行接单流程...")
-
                     click_x = monitor_region[0] + monitor_region[2] / 2
                     click_y = monitor_region[1] + monitor_region[3] / 2
                     pyautogui.click(click_x, click_y)
                     time.sleep(cfg['delay_step1_2'])
-
                     print("进入详情页，执行单次快速滚动到底部...")
-                    # 【滑动优化】执行一次大幅度的向下滚动
                     pyautogui.scroll(-2000)
                     time.sleep(cfg['delay_others'])
-
                     print(f"点击接单按钮: ({int(cfg['accept_btn_x'])}, {int(cfg['accept_btn_y'])})")
                     pyautogui.click(int(cfg['accept_btn_x']), int(cfg['accept_btn_y']))
                     time.sleep(cfg['delay_others'])
-
                     print(f"点击确认按钮: ({int(cfg['confirm_btn_x'])}, {int(cfg['confirm_btn_y'])})")
                     pyautogui.click(int(cfg['confirm_btn_x']), int(cfg['confirm_btn_y']))
                     time.sleep(cfg['delay_others'])
-
                     print(f"点击关闭按钮: ({int(cfg['close_btn_x'])}, {int(cfg['close_btn_y'])})")
                     pyautogui.click(int(cfg['close_btn_x']), int(cfg['close_btn_y']))
-
                     print("--- 一次接单流程完成，返回监控状态 ---")
                     time.sleep(3)
-
                 time.sleep(0.5)
-
             except Exception as e:
                 print(f"自动化流程中发生错误: {e}")
                 time.sleep(2)
-
         print("--- 自动化流程已停止 ---")
 
 
 if __name__ == "__main__":
-    # --- Windows Tesseract 配置 ---
-    # 【重要】请检查你的Tesseract安装路径是否与下面的一致。
-    # 如果不一致，请修改为你的实际路径，然后取消下面这行代码的注释。
-    # pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+    # ==================================================================
+    # 【调试代码块】
+    # ==================================================================
+    print("--- Tesseract OCR 引擎调试启动 ---")
+
+    # 步骤 1: 定义并检查 Tesseract 的路径
+    tesseract_path = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+    print(f"[1] 检查路径: '{tesseract_path}'")
+    if os.path.exists(tesseract_path):
+        print("  -> 状态: 成功! 文件存在。")
+
+        # 步骤 2: 列出目录内容
+        tesseract_dir = os.path.dirname(tesseract_path)
+        print(f"\n[2] 检查目录内容: '{tesseract_dir}'")
+        try:
+            files_in_dir = os.listdir(tesseract_dir)
+            print("  -> 目录下的文件列表:")
+            for filename in files_in_dir:
+                print(f"     - {filename}")
+            if 'tesseract.exe' in files_in_dir:
+                print("  -> 状态: 成功! 'tesseract.exe' 已在列表中找到。")
+            else:
+                print("  -> 状态: 失败! 'tesseract.exe' 未在列表中找到。")
+        except Exception as e:
+            print(f"  -> 状态: 失败! 无法读取目录内容，错误: {e}")
+
+        # 步骤 3: 检查文件权限
+        print(f"\n[3] 检查文件权限: '{tesseract_path}'")
+        if os.access(tesseract_path, os.X_OK):
+            print("  -> 状态: 成功! 文件具有执行权限。")
+        else:
+            print("  -> 状态: 失败! 文件不具有执行权限。可能是权限问题。")
+
+        # 步骤 4: 尝试直接执行命令
+        print("\n[4] 尝试直接调用 Tesseract 命令...")
+        try:
+            # 使用 subprocess 直接运行 tesseract --version
+            # capture_output=True 会捕获标准输出和标准错误
+            # text=True 会将输出解码为文本
+            result = subprocess.run([tesseract_path, '--version'], capture_output=True, text=True, check=True)
+            print("  -> 命令执行成功!")
+            print("  -> Tesseract 版本信息:")
+            print(result.stdout)
+            print("  -> 状态: 成功! Python 可以正常调用 Tesseract。")
+
+            # 如果所有检查都通过，就正式为 pytesseract 设置路径
+            pytesseract.pytesseract.tesseract_cmd = tesseract_path
+            print("\n[结论] 所有调试检查通过，已为 pytesseract 设置命令路径。")
+
+        except FileNotFoundError:
+            print("  -> 状态: 失败! 系统报告'文件未找到'。这通常意味着路径字符串有问题或程序被阻止。")
+        except PermissionError:
+            print("  -> 状态: 失败! '权限错误'。请尝试以管理员身份运行你的脚本或CMD。")
+        except subprocess.CalledProcessError as e:
+            print(f"  -> 状态: 失败! 命令执行后返回了错误。")
+            print(f"  -> 错误码: {e.returncode}")
+            print(f"  -> 输出: {e.stdout}")
+            print(f"  -> 错误信息: {e.stderr}")
+        except Exception as e:
+            print(f"  -> 状态: 失败! 发生未知错误: {e}")
+
+    else:
+        print("  -> 状态: 失败! 指定路径的文件不存在。请确认 Tesseract 是否安装在此路径。")
+
+    print("\n--- 调试结束，准备启动GUI ---")
+    # ==================================================================
 
     app = App()
     app.mainloop()
