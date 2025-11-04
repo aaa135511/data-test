@@ -7,6 +7,57 @@ from PyQt6.QtGui import QPalette, QBrush, QLinearGradient, QColor
 from PyQt6.QtCore import Qt, QTimer, QDateTime
 
 
+# --- KEY CHANGE: A completely new, robust custom QLineEdit class ---
+class PlaceholderLineEdit(QLineEdit):
+    def __init__(self, placeholder_text="", parent=None):
+        super().__init__(parent)
+        self.placeholder_text = placeholder_text
+
+        # Define colors for the two states
+        self.placeholder_color = QColor('#AAAAAA')  # Light gray for placeholder
+        self.default_color = QColor('white')  # Normal input text color
+
+        self.is_placeholder_active = False
+        self.show_placeholder()
+
+    def show_placeholder(self):
+        """Sets the widget to its placeholder state: read-only, no cursor, gray text."""
+        self.is_placeholder_active = True
+        self.setReadOnly(True)  # This is the key to hiding the cursor
+        self.setText(self.placeholder_text)
+        palette = self.palette()
+        palette.setColor(QPalette.ColorRole.Text, self.placeholder_color)
+        self.setPalette(palette)
+
+    def hide_placeholder(self):
+        """Sets the widget to its normal input state: editable, cursor visible, white text."""
+        self.is_placeholder_active = False
+        self.setReadOnly(False)
+        self.setText("")
+        palette = self.palette()
+        palette.setColor(QPalette.ColorRole.Text, self.default_color)
+        self.setPalette(palette)
+        self.setFocus()  # Ensure it gets focus and the cursor appears
+
+    def mousePressEvent(self, event):
+        """When the user clicks on the widget, switch to normal input mode."""
+        if self.is_placeholder_active:
+            self.hide_placeholder()
+        super().mousePressEvent(event)
+
+    def focusOutEvent(self, event):
+        """When the widget loses focus, check if it's empty and show placeholder if needed."""
+        if not self.text():
+            self.show_placeholder()
+        super().focusOutEvent(event)
+
+    def text(self):
+        """Overrides the default text() method to return empty if it's a placeholder."""
+        if self.is_placeholder_active:
+            return ""
+        return super().text()
+
+
 class IndustrialUI(QWidget):
     def __init__(self):
         super().__init__()
@@ -15,7 +66,6 @@ class IndustrialUI(QWidget):
     def init_ui(self):
         """初始化主窗口UI"""
         self.setWindowTitle("累计量监控界面")
-        # --- KEY CHANGE: Window size reduced to 0.7x as requested. ---
         self.setGeometry(100, 100, 840, 532)
 
         palette = QPalette()
@@ -32,10 +82,6 @@ class IndustrialUI(QWidget):
 
         main_layout.addLayout(self.create_top_bar())
         main_layout.addLayout(self.create_main_panels())
-
-        # --- KEY CHANGE: Removed the main stretch to let content fill the smaller window naturally. ---
-        # main_layout.addStretch(1)
-
         main_layout.addLayout(self.create_bottom_bar())
 
         self.setLayout(main_layout)
@@ -45,17 +91,23 @@ class IndustrialUI(QWidget):
         """创建顶部信息栏"""
         top_bar_layout = QHBoxLayout()
         left_info = QLabel("CREC796 Ver 2.1.4 17437   中铁工程装备集团")
-        left_info.setStyleSheet("color: white; font-size: 14px;")  # Adjusted for smaller screen
+        left_info.setStyleSheet("color: white; font-size: 14px;")
         plc_status = QLabel(" PLC连接正常 ")
         plc_status.setStyleSheet("background-color: yellow; color: black; font-size: 14px;")
-        self.project_input = QLineEdit()
-        self.project_input.setPlaceholderText("西松区间左线")
+
+        # --- KEY CHANGE: Using the new, robust PlaceholderLineEdit class. ---
+        self.project_input = PlaceholderLineEdit(placeholder_text="西松区间左线")
         self.project_input.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.project_input.setStyleSheet("""
-            QLineEdit { background-color: rgba(0, 0, 0, 0.3); border: 1px solid #ADD8E6;
-                        color: white; font-size: 14px; font-weight: bold;
-                        padding: 4px; min-width: 150px; border-radius: 4px; }
+            background-color: rgba(0, 0, 0, 0.3); 
+            border: 1px solid #ADD8E6;
+            font-size: 14px; 
+            font-weight: bold;
+            padding: 4px; 
+            min-width: 150px; 
+            border-radius: 4px;
         """)
+
         self.time_label = QLabel()
         self.time_label.setStyleSheet("color: white; font-size: 16px; font-weight: bold;")
 
@@ -109,7 +161,7 @@ class IndustrialUI(QWidget):
         """创建左侧“累计量”面板"""
         group_box = QGroupBox("累计量")
         layout = QGridLayout()
-        layout.setVerticalSpacing(8)
+        layout.setVerticalSpacing(12)
         layout.setHorizontalSpacing(4)
 
         ring_header = QLabel("环累计量")
@@ -258,7 +310,6 @@ class IndustrialUI(QWidget):
     def create_bottom_bar(self):
         """创建底部导航栏"""
         bottom_bar_layout = QHBoxLayout()
-        # --- KEY CHANGE: Set spacing to 0 to remove gaps between buttons. ---
         bottom_bar_layout.setSpacing(0)
 
         buttons = ["主监控页", "泡沫系统", "注浆系统", "变频驱动", "辅助系统", "盾尾密封",
@@ -276,7 +327,7 @@ class IndustrialUI(QWidget):
         line_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
         line_edit.setStyleSheet("""
             QLineEdit { background-color: black; color: #39FF14; border: 1px solid #4A4A4A;
-                        font-size: 16px; font-weight: bold; padding: 5px; }
+                        font-size: 18px; font-weight: bold; padding: 5px; }
         """)
         if width:
             line_edit.setFixedWidth(width)
@@ -288,18 +339,17 @@ class IndustrialUI(QWidget):
             QGroupBox {
                 background-color: rgba(85, 135, 225, 0.7);
                 border: 1px solid #ADD8E6; border-radius: 8px; margin-top: 1ex;
-                font-size: 16px; font-weight: bold;
+                font-size: 18px; font-weight: bold;
             }
             QGroupBox::title {
                 subcontrol-origin: margin; subcontrol-position: top center;
                 padding: 0 8px; color: yellow;
             }
-            QLabel { color: white; font-size: 14px; background-color: transparent; }
+            QLabel { color: white; font-size: 16px; background-color: transparent; }
         """
 
     def get_button_style(self, active=False, last=False):
         """返回底部按钮的样式"""
-        # --- KEY CHANGE: Added a right border to non-last buttons to create a separator. ---
         if active:
             return """
                 QPushButton { background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #87CEEB, stop:1 #4682B4);
