@@ -1,61 +1,87 @@
 import sys
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QLineEdit, QPushButton, QGridLayout,
-    QVBoxLayout, QHBoxLayout, QGroupBox, QSpacerItem, QSizePolicy
+    QVBoxLayout, QHBoxLayout, QGroupBox, QSpacerItem, QSizePolicy, QStackedLayout
 )
 from PyQt6.QtGui import QPalette, QBrush, QLinearGradient, QColor
 from PyQt6.QtCore import Qt, QTimer, QDateTime
 
 
-# --- KEY CHANGE: A completely new, robust custom QLineEdit class ---
+# A custom QLineEdit class to manually handle placeholder text
 class PlaceholderLineEdit(QLineEdit):
     def __init__(self, placeholder_text="", parent=None):
         super().__init__(parent)
         self.placeholder_text = placeholder_text
 
-        # Define colors for the two states
-        self.placeholder_color = QColor('#AAAAAA')  # Light gray for placeholder
-        self.default_color = QColor('white')  # Normal input text color
+        self.placeholder_color = QColor('#AAAAAA')
+        self.default_color = QColor('white')
 
         self.is_placeholder_active = False
         self.show_placeholder()
 
     def show_placeholder(self):
-        """Sets the widget to its placeholder state: read-only, no cursor, gray text."""
         self.is_placeholder_active = True
-        self.setReadOnly(True)  # This is the key to hiding the cursor
+        self.setReadOnly(True)
         self.setText(self.placeholder_text)
         palette = self.palette()
         palette.setColor(QPalette.ColorRole.Text, self.placeholder_color)
         self.setPalette(palette)
 
     def hide_placeholder(self):
-        """Sets the widget to its normal input state: editable, cursor visible, white text."""
         self.is_placeholder_active = False
         self.setReadOnly(False)
         self.setText("")
         palette = self.palette()
         palette.setColor(QPalette.ColorRole.Text, self.default_color)
         self.setPalette(palette)
-        self.setFocus()  # Ensure it gets focus and the cursor appears
+        self.setFocus()
 
     def mousePressEvent(self, event):
-        """When the user clicks on the widget, switch to normal input mode."""
         if self.is_placeholder_active:
             self.hide_placeholder()
         super().mousePressEvent(event)
 
     def focusOutEvent(self, event):
-        """When the widget loses focus, check if it's empty and show placeholder if needed."""
         if not self.text():
             self.show_placeholder()
         super().focusOutEvent(event)
 
     def text(self):
-        """Overrides the default text() method to return empty if it's a placeholder."""
         if self.is_placeholder_active:
             return ""
         return super().text()
+
+
+# --- KEY CHANGE: A new widget for editable labels ---
+class EditableLabel(QWidget):
+    def __init__(self, text, style_sheet, parent=None):
+        super().__init__(parent)
+        self.layout = QStackedLayout(self)
+        self.layout.setStackingMode(QStackedLayout.StackingMode.StackAll)
+
+        self.label = QLabel(text)
+        self.label.setStyleSheet(style_sheet)
+
+        self.line_edit = QLineEdit(text)
+        self.line_edit.setStyleSheet(style_sheet)
+        self.line_edit.hide()
+
+        self.layout.addWidget(self.label)
+        self.layout.addWidget(self.line_edit)
+
+        self.line_edit.editingFinished.connect(self.finish_editing)
+
+    def mouseDoubleClickEvent(self, event):
+        self.label.hide()
+        self.line_edit.setText(self.label.text())
+        self.line_edit.show()
+        self.line_edit.setFocus()
+        super().mouseDoubleClickEvent(event)
+
+    def finish_editing(self):
+        self.label.setText(self.line_edit.text())
+        self.line_edit.hide()
+        self.label.show()
 
 
 class IndustrialUI(QWidget):
@@ -85,17 +111,21 @@ class IndustrialUI(QWidget):
         main_layout.addLayout(self.create_bottom_bar())
 
         self.setLayout(main_layout)
-        self.start_clock()
+
+        initial_time = QDateTime.currentDateTime().toString("yyyy/MM/dd hh:mm:ss")
+        self.time_input.setText(initial_time)
 
     def create_top_bar(self):
         """创建顶部信息栏"""
         top_bar_layout = QHBoxLayout()
-        left_info = QLabel("CREC796 Ver 2.1.4 17437   中铁工程装备集团")
-        left_info.setStyleSheet("color: white; font-size: 14px;")
+
+        # --- KEY CHANGE: Using the new EditableLabel widget for the title. ---
+        title_style = "color: white; font-size: 14px; background-color: transparent; border: none;"
+        self.title_widget = EditableLabel("CREC796 Ver 2.1.4 17437   中铁工程装备集团", title_style)
+
         plc_status = QLabel(" PLC连接正常 ")
         plc_status.setStyleSheet("background-color: yellow; color: black; font-size: 14px;")
 
-        # --- KEY CHANGE: Using the new, robust PlaceholderLineEdit class. ---
         self.project_input = PlaceholderLineEdit(placeholder_text="西松区间左线")
         self.project_input.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.project_input.setStyleSheet("""
@@ -108,15 +138,24 @@ class IndustrialUI(QWidget):
             border-radius: 4px;
         """)
 
-        self.time_label = QLabel()
-        self.time_label.setStyleSheet("color: white; font-size: 16px; font-weight: bold;")
+        self.time_input = QLineEdit()
+        self.time_input.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.time_input.setStyleSheet("""
+            QLineEdit {
+                background-color: transparent;
+                border: none;
+                color: white;
+                font-size: 16px;
+                font-weight: bold;
+            }
+        """)
 
-        top_bar_layout.addWidget(left_info)
+        top_bar_layout.addWidget(self.title_widget)
         top_bar_layout.addWidget(plc_status)
         top_bar_layout.addStretch(1)
         top_bar_layout.addWidget(self.project_input)
         top_bar_layout.addStretch(1)
-        top_bar_layout.addWidget(self.time_label)
+        top_bar_layout.addWidget(self.time_input)
         return top_bar_layout
 
     def create_main_panels(self):
@@ -376,19 +415,6 @@ class IndustrialUI(QWidget):
                 }
             """
             return style
-
-    def start_clock(self):
-        """启动一个定时器，每秒更新时间标签"""
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.update_time)
-        self.timer.start(1000)
-        self.update_time()
-
-    def update_time(self):
-        """获取当前时间并更新标签"""
-        current_time = QDateTime.currentDateTime()
-        formatted_time = current_time.toString("yyyy/MM/dd hh:mm:ss")
-        self.time_label.setText(formatted_time)
 
 
 if __name__ == '__main__':
