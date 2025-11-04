@@ -1,69 +1,71 @@
-# 车辆查找脚本打包指南 (PyInstaller)
+# 车辆查找脚本打包指南 (捆绑Tesseract版)
 
-本指南将指导您如何使用 PyInstaller 将 Python 脚本打包成一个独立的 Windows 可执行文件 (`.exe`)。
+本指南将指导您如何使用 PyInstaller 将 Python 脚本和 **Tesseract-OCR 引擎** 一同打包，创建一个完全独立的、无需额外安装任何依赖的 Windows 可执行文件 (`.exe`)。
 
 ## 1. 打包前准备
 
-### a. 安装依赖库
-确保您的 Python 环境中已经安装了脚本所需的所有库。在命令行中运行：
-```bash
-pip install customtkinter pillow pyautogui pytesseract opencv-python-headless
+### a. 文件结构
+在开始打包前，请确保您的项目文件夹结构清晰。您只需要准备好您的 Python 脚本即可。
+```
+your_project_folder/
+└── vin_finder_windows_bundle.py
+└── app.ico  (可选的图标文件)
 ```
 
-### b. 安装 Tesseract-OCR (至关重要！)
-PyInstaller **不会** 将 Tesseract-OCR 引擎本身打包进 `.exe` 文件。这意味着，**任何要运行此 `.exe` 程序的电脑，都必须预先独立安装 Tesseract-OCR**。
-
-- **下载地址**: [Tesseract at UB Mannheim](https://github.com/UB-Mannheim/tesseract/wiki)
-- **安装注意**:
-    1. 在安装过程中，请务必勾选 "Additional language data" 下的简体中文 (`chi_sim`) 语言包。
-    2. 强烈建议将 Tesseract **添加到系统的 PATH 环境变量**中。这会让打包后的程序在任何电脑上都能自动找到它。
-    3. 如果您不添加到 PATH，请确保脚本中指定的 Tesseract 路径 (`C:\Program Files\Tesseract-OCR\tesseract.exe`) 与目标电脑上的安装路径完全一致。
-
-## 2. 安装 PyInstaller
-
-如果尚未安装 PyInstaller，请在命令行中运行：
+### b. 安装本地依赖
+确保您的**开发环境**中已经安装了所有必要的库。在命令行中运行：
 ```bash
-pip install pyinstaller
+pip install customtkinter pillow pyautogui pytesseract opencv-python-headless pyinstaller
 ```
 
-## 3. 执行打包命令
+### c. 确认 Tesseract-OCR 安装路径
+您必须在**您的开发电脑**上安装 Tesseract-OCR，因为 PyInstaller 需要从那里复制文件。
+- **默认安装路径**: `C:\Program Files\Tesseract-OCR`
+- 如果您安装在其他位置，请记下该路径，打包时需要用到。
+
+## 2. 执行打包命令 (核心步骤)
+
+这是将所有东西捆绑在一起的关键。
 
 1.  打开命令提示符 (cmd) 或 PowerShell。
-2.  使用 `cd` 命令切换到您的 Python 脚本 (`vin_finder_windows.py`) 所在的文件夹。
-3.  执行以下命令进行打包：
+2.  使用 `cd` 命令切换到您的 Python 脚本 (`vin_finder_windows_bundle.py`) 所在的文件夹。
+3.  **复制并执行**以下命令。如果您的 Tesseract 安装路径不同，请相应修改 `"C:\Program Files\Tesseract-OCR"` 部分。
 
     ```bash
-    pyinstaller --name VinFinder --onefile --windowed --icon=app.ico vin_finder_windows.py
+    pyinstaller --name VinFinder --onefile --windowed --icon=app.ico --add-data "C:\Program Files\Tesseract-OCR;tesseract" vin_finder_windows_bundle.py
     ```
 
 ### 命令详解
-- `--name VinFinder`: 指定生成的可执行文件名，最终会生成 `VinFinder.exe`。
-- `--onefile`: 将所有依赖项打包成一个单一的 `.exe` 文件，方便分发。
-- `--windowed` (或 `--noconsole`): 这是**必须**的选项。它指定这是一个图形界面程序，运行时不会显示黑色的命令行窗口。
-- `--icon=app.ico`: (可选) 为您的程序指定一个自定义图标。您需要自己准备一个 `.ico` 格式的图标文件，并将其命名为 `app.ico`（或任何您喜欢的名字），与脚本放在同一目录下。
-- `vin_finder_windows.py`: 您要打包的主脚本文件。
+- `--name VinFinder`: 指定生成的可执行文件名 (`VinFinder.exe`)。
+- `--onefile`: 将所有内容打包成一个 `.exe` 文件。
+- `--windowed`: 以无控制台的窗口模式运行程序，这是GUI应用的必需选项。
+- `--icon=app.ico`: (可选) 为程序指定图标。
+- `--add-data "C:\Program Files\Tesseract-OCR;tesseract"`: **这是最重要的部分**。
+    - `C:\Program Files\Tesseract-OCR`: 这是**源路径**，即您电脑上 Tesseract 的安装文件夹。
+    - `tesseract`: 这是**目标路径**。它告诉 PyInstaller，在打包后的程序内部创建一个名为 `tesseract` 的文件夹，并将源路径的所有内容复制进去。
+    - 我们的 Python 脚本经过修改，会自动在程序内部的这个 `tesseract` 文件夹里寻找 `tesseract.exe`。
+- `vin_finder_windows_bundle.py`: 您要打包的主脚本文件。
 
-## 4. 打包后操作
+## 3. 打包后操作
 
-- 打包过程可能需要几分钟。完成后，您的文件夹中会出现几个新文件夹 (`build`, `dist`) 和一个 `.spec` 文件。
-- 您最终需要的可执行文件位于 **`dist`** 文件夹内，即 `dist/VinFinder.exe`。
-- 您可以将这个 `.exe` 文件复制到任何**已经安装了 Tesseract-OCR** 的 Windows 电脑上运行。
+- 打包完成后，您需要的可执行文件 `VinFinder.exe` 会位于 **`dist`** 文件夹内。
+- 现在，您可以将这个**单一的 `.exe` 文件**分发给任何 Windows 用户。他们**无需安装 Python，也无需安装 Tesseract-OCR**，双击即可直接运行！
 
-## 5. 常见问题 (Troubleshooting)
+## 4. 常见问题 (Troubleshooting)
 
-#### Q1: 程序运行后提示 "Tesseract is not installed or it's not in your PATH" 错误。
-**A1:** 这是最常见的问题。说明程序找不到 Tesseract 引擎。
-- **解决方案**: 在运行 `.exe` 的电脑上，确保 Tesseract-OCR 已经正确安装，并且其安装目录（例如 `C:\Program Files\Tesseract-OCR`）已经被添加到了系统的 PATH 环境变量中。
+#### Q1: 打包时报错，提示找不到 `"C:\Program Files\Tesseract-OCR"`。
+**A1:** 这意味着您的 Tesseract 安装路径与命令中指定的不符。请找到您电脑上 Tesseract 的实际安装文件夹，并用该路径替换命令中的 `"C:\Program Files\Tesseract-OCR"`。
 
-#### Q2: 双击 `.exe` 文件后，程序闪退，没有任何反应。
-**A2:** 这通常意味着程序在启动时遇到了致命错误，但由于 `--windowed` 选项隐藏了错误信息，您看不到。
+#### Q2: 双击 `.exe` 文件后，程序闪退或无法识别文字。
+**A2:** 这很可能是 Tesseract 的某些文件没有被正确打包。
 - **解决方案**:
-    1. 返回命令行，重新打包，但**移除 `--windowed` 选项**：
-       ```bash
-       pyinstaller --name VinFinder --onefile vin_finder_windows.py
-       ```
-    2. 再次运行新生成的 `.exe` 文件。这次，如果程序崩溃，会弹出一个显示详细错误信息的命令行窗口。根据错误信息来修复代码或环境问题。
+    1.  重新打包，但暂时**移除 `--windowed` 和 `--onefile`** 选项：
+        ```bash
+        pyinstaller --name VinFinder --add-data "C:\Program Files\Tesseract-OCR;tesseract" vin_finder_windows_bundle.py
+        ```
+    2.  这会在 `dist/VinFinder` 文件夹下生成一大堆文件和一个 `.exe`。进入该文件夹，检查是否存在一个名为 `tesseract` 的子文件夹，并且其中包含了 `tesseract.exe` 和 `tessdata` 文件夹。
+    3.  直接在该文件夹中运行 `VinFinder.exe`。如果出现错误，命令行窗口会显示详细信息，帮助您定位问题。
 
 #### Q3: 防病毒软件将我生成的 `.exe` 报为病毒。
-**A3:** 这是 PyInstaller 打包的程序常见的误报。因为打包过程会将 Python 解释器和脚本捆绑在一起，某些杀毒软件的启发式扫描会认为这种行为可疑。
-- **解决方案**: 如果这是您自己电脑上打包的程序，可以暂时信任或将其添加到杀毒软件的白名单中。
+**A3:** 这是 PyInstaller 打包的程序（尤其是 `--onefile` 模式）常见的误报。
+- **解决方案**: 在您自己的电脑上，可以将文件添加到杀毒软件的白名单中。在分发给他人时，可以提前告知这属于正常误报。
