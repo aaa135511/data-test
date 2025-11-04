@@ -12,7 +12,7 @@ import numpy as np
 import sys
 
 
-# --- 配置文件管理器 (无变化) ---
+# --- 配置文件管理器 (有修改) ---
 class ConfigManager:
     def __init__(self):
         self.config_dir = os.path.join(os.path.expanduser("~"), ".auto_order_accepter")
@@ -25,7 +25,8 @@ class ConfigManager:
             "confirm_btn_x": "500", "confirm_btn_y": "550",
             "close_btn_x": "900", "close_btn_y": "100",
             "delay_step1_2": "0.5",
-            "delay_others": "0.1"
+            "delay_others": "0.1",
+            "delay_after_confirm": "2.0"  # 【新增】确认后延时的默认值
         }
         os.makedirs(self.config_dir, exist_ok=True)
 
@@ -64,12 +65,12 @@ class TextRedirector(object):
         pass
 
 
-# --- 主应用 GUI (无变化) ---
+# --- 主应用 GUI (有修改) ---
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("自动接单助手 (Windows版)")
-        self.geometry("550x650")
+        self.geometry("550x680")  # 稍微增加高度以容纳新控件
         self.attributes('-topmost', True)
         self.config_manager = ConfigManager()
         self.entries = {}
@@ -95,6 +96,9 @@ class App(tk.Tk):
         ttk.Separator(settings_frame, orient='horizontal').grid(row=6, columnspan=4, sticky='ew', pady=5)
         self.add_delay_entry(settings_frame, "步骤1->2延时(秒):", "delay_step1_2", 7)
         self.add_delay_entry(settings_frame, "其他步骤延时(秒):", "delay_others", 8)
+        # 【新增】添加新的延时设置GUI
+        self.add_delay_entry(settings_frame, "确认后延时(秒):", "delay_after_confirm", 9)
+
         coords_frame = ttk.LabelFrame(main_frame, text="工具")
         coords_frame.pack(fill=tk.X, pady=10)
         self.coord_label = ttk.Label(coords_frame, text="鼠标坐标: (x, y)", font=("Helvetica", 12))
@@ -194,7 +198,6 @@ class App(tk.Tk):
             self.stop_automation()
         self.destroy()
 
-    # --- 自动化核心逻辑 (有重大修改) ---
     def _automation_loop(self):
         cfg = self.current_config
         monitor_region = (
@@ -242,15 +245,14 @@ class App(tk.Tk):
                     search_area_shot = pyautogui.screenshot(region=accept_search_region)
                     search_area_cv = cv2.cvtColor(np.array(search_area_shot), cv2.COLOR_RGB2BGR)
 
-                    # 【BUG修复】在匹配前检查尺寸
                     search_h, search_w, _ = search_area_cv.shape
                     if search_h < template_h or search_w < template_w:
                         print(
                             f"[错误] '接单按钮搜索区' ({search_w}x{search_h}) 小于模板图片 ({template_w}x{template_h})！")
                         print("请在GUI中设置一个更大的搜索区域。正在关闭详情页...")
                         pyautogui.click(int(cfg['close_btn_x']), int(cfg['close_btn_y']))
-                        time.sleep(3)  # 等待返回
-                        continue  # 跳过本次循环的剩余部分
+                        time.sleep(3)
+                        continue
 
                     result = cv2.matchTemplate(search_area_cv, template_image, cv2.TM_CCOEFF_NORMED)
                     min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
@@ -269,7 +271,10 @@ class App(tk.Tk):
                         print(f"点击确认按钮...")
                         pyautogui.click(int(cfg['confirm_btn_x']), int(cfg['confirm_btn_y']))
                         t4 = time.time()
-                        time.sleep(cfg['delay_others'])
+
+                        # 【修改】使用新的可配置延时
+                        print(f"等待加载 {cfg['delay_after_confirm']} 秒...")
+                        time.sleep(cfg['delay_after_confirm'])
 
                         # 成功接单后，关闭按钮的点击是最后一步
                         pyautogui.click(int(cfg['close_btn_x']), int(cfg['close_btn_y']))
@@ -280,7 +285,6 @@ class App(tk.Tk):
                         print("------------------------------------")
 
                     else:
-                        # 【流程调整】未找到按钮，判定为已被接单
                         print(f"[信息] 未找到'接单'按钮 (最高相似度: {max_val:.2f})，可能已被他人接单。")
                         print("正在关闭详情页返回...")
                         pyautogui.click(int(cfg['close_btn_x']), int(cfg['close_btn_y']))
