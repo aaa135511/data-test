@@ -13,36 +13,28 @@ import sys
 import os
 
 
-# --- [重要] 动态 Tesseract-OCR 路径配置 ---
-# 此函数用于在打包后正确找到 Tesseract 的路径
+# --- 动态 Tesseract-OCR 路径配置 ---
 def get_tesseract_path():
-    # 检查脚本是否作为打包后的可执行文件运行
     if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
-        # 如果是打包文件，Tesseract被我们放在了'tesseract'子文件夹中
-        # sys._MEIPASS 指向 PyInstaller 创建的临时文件夹
         return os.path.join(sys._MEIPASS, 'tesseract', 'tesseract.exe')
     else:
-        # 如果是作为.py脚本运行，则使用本地安装的Tesseract
-        # 请确保此路径对您的开发环境是正确的
         return r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
 
-# 在程序启动时设置 Tesseract 命令路径
 try:
     pytesseract.pytesseract.tesseract_cmd = get_tesseract_path()
 except Exception as e:
     print(f"设置 Tesseract 路径时出错: {e}")
-    # 您可以在这里添加一个弹窗，如果找不到Tesseract就提示用户
 
 
 # --- 配置结束 ---
 
 
-# --- 主应用界面 (Windows 捆绑版) ---
+# --- 主应用界面 (容错版) ---
 class VinSearchApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("车辆查找脚本 (Windows 捆绑版)")
+        self.title("车辆查找脚本")
         self.geometry("500x750")
 
         ctk.set_appearance_mode("System")
@@ -55,7 +47,7 @@ class VinSearchApp(ctk.CTk):
         self.main_frame = ctk.CTkFrame(self)
         self.main_frame.pack(padx=20, pady=20, fill="both", expand=True)
 
-        # --- UI 组件 ---
+        # --- UI 组件 (布局无变化) ---
         self.vin_label = ctk.CTkLabel(self.main_frame, text="输入目标车架号后六位:")
         self.vin_label.pack(pady=(0, 5))
         self.vin_entry = ctk.CTkEntry(self.main_frame, width=200)
@@ -111,8 +103,6 @@ class VinSearchApp(ctk.CTk):
         self.update_mouse_coords_display()
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
-    # ... (其余所有函数保持不变) ...
-
     def update_mouse_coords_display(self):
         try:
             x, y = pyautogui.position()
@@ -133,11 +123,20 @@ class VinSearchApp(ctk.CTk):
         self.start_button.configure(text="开始查找")
         self.log(final_message)
 
-    def handle_found_vin(self, found_vin):
+    # --- [核心修改] 优化的成功处理函数 ---
+    def handle_found_vin(self, target_vin, recognized_num):
         self.is_searching = False
-        self.log(f"成功！已找到车架号: {found_vin}")
-        pyautogui.alert(f"已找到车辆: {found_vin}", "任务完成")
+        if target_vin == recognized_num:
+            # 精确匹配
+            self.log(f"成功！已精确找到车架号: {target_vin}")
+            pyautogui.alert(f"已找到车辆: {target_vin}", "任务完成")
+        else:
+            # 容错匹配
+            self.log(f"成功！通过容错匹配找到目标 '{target_vin}' (识别为: '{recognized_num}')")
+            pyautogui.alert(f"通过容错匹配找到车辆！\n\n目标: {target_vin}\n识别为: {recognized_num}", "任务完成")
         self.reset_ui_on_stop("查找成功，任务结束。")
+
+    # --- 修改结束 ---
 
     def toggle_search(self):
         if self.is_searching:
@@ -162,7 +161,10 @@ class VinSearchApp(ctk.CTk):
             self.search_thread.start()
 
     def preprocess_image_for_ocr(self, img):
-        gray = cv2.cvtColor(np.array(img), cv2.COLOR_BGR2GRAY)
+        cv_img = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+        h, w, _ = cv_img.shape
+        upscaled_img = cv2.resize(cv_img, (w * 2, h * 2), interpolation=cv2.INTER_CUBIC)
+        gray = cv2.cvtColor(upscaled_img, cv2.COLOR_BGR2GRAY)
         _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         return Image.fromarray(thresh)
 
@@ -189,14 +191,28 @@ class VinSearchApp(ctk.CTk):
             last_image = screenshot
 
             processed_img = self.preprocess_image_for_ocr(screenshot)
-            extracted_text = pytesseract.image_to_string(processed_img, lang='chi_sim+eng',
-                                                         config='--psm 6 -c tessedit_char_whitelist=0123456789')
-            found_numbers = re.findall(r'\d{6}', extracted_text)
+            config = '--psm 4 -c tessedit_char_whitelist=0123456789'
+            extracted_text = pytesseract.image_to_string(processed_img, lang='chi_sim+eng', config=config)
+
+            # --- [核心修改] 实现容错匹配逻辑 ---
+            # 1. 查找所有长度大于等于5的数字串
+            found_numbers_raw = re.findall(r'\d{5,}', extracted_text)
+            found_numbers = sorted(list(set(found_numbers_raw)))
+
             self.safe_ui_update(self.log, f"识别到: {found_numbers if found_numbers else '无'}")
 
-            if target_vin in found_numbers:
-                self.safe_ui_update(self.handle_found_vin, target_vin)
-                return
+            # 2. 循环检查每个识别出的数字，看是否与目标存在包含关系
+            match_found = False
+            for num in found_numbers:
+                if target_vin in num or num in target_vin:
+                    # 找到了！调度主线程处理成功后的所有事宜
+                    self.safe_ui_update(self.handle_found_vin, target_vin, num)
+                    match_found = True
+                    break  # 退出内层循环
+
+            if match_found:
+                return  # 退出整个 search_loop 线程
+            # --- 修改结束 ---
 
             self.safe_ui_update(self.log, "向下滚动...")
             pyautogui.moveTo(self.monitoring_area[0] + (self.monitoring_area[2] - self.monitoring_area[0]) / 2,
