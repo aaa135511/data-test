@@ -72,7 +72,7 @@ pip install pyautogui pillow pytesseract opencv-python numpy mss
 
 3.  **执行打包命令**：打开CMD，进入该目录，并运行以下命令：
     ```bash
-    pyinstaller --name "自动接单助手" --onefile --windowed --icon="app.ico" --add-data "C:/Program Files/Tesseract-OCR/tessdata;tessdata" --add-data "accept_button_template.png;." auto_order_accepter_windows.py
+    pyinstaller --name "自动接单助手" --onefile --windowed --icon="app.ico" --add-data "C:/Program Files/Tesseract-OCR/tessdata;tessdata" auto_order_accepter_windows.py
     ```
 4.  **查找成品**：打包成功后，可在生成的 `dist` 文件夹内找到 `自动接单助手.exe`。
 

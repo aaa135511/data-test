@@ -13,16 +13,17 @@ import sys
 import mss
 
 
-# 【新增】资源路径解析函数，解决打包后找不到文件的问题
-def resource_path(relative_path):
-    """ 获取资源的绝对路径，无论是从源码运行还是从打包后的exe运行 """
-    try:
-        # PyInstaller 创建一个临时文件夹，并将路径存储在 _MEIPASS 中
-        base_path = sys._MEIPASS
-    except Exception:
-        base_path = os.path.abspath(".")
+# 【修改】使用新的路径函数，用于查找与exe同目录的资源
+def get_application_path(relative_path):
+    """ 获取可执行文件或脚本所在目录的资源路径 """
+    if getattr(sys, 'frozen', False):
+        # 如果是打包后的exe
+        application_path = os.path.dirname(sys.executable)
+    else:
+        # 如果是直接运行的.py脚本
+        application_path = os.path.dirname(os.path.abspath(__file__))
 
-    return os.path.join(base_path, relative_path)
+    return os.path.join(application_path, relative_path)
 
 
 # --- 配置文件管理器 (无变化) ---
@@ -193,21 +194,15 @@ class App(tk.Tk):
                 break
 
     def start_automation(self):
-        # 【修改】使用 resource_path 检查模板文件
-        template_path = resource_path('accept_button_template.png')
+        template_path = get_application_path('accept_button_template.png')
         if not os.path.exists(template_path):
             messagebox.showerror("错误",
                                  f"找不到模板文件！\n路径: {template_path}\n请确保 'accept_button_template.png' 与程序在同一目录下。")
             return
-
         self.is_running = True
         self.status_label.config(text="状态: 运行中...", foreground="green")
         self.start_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
-
-        # 【修改】删除或注释掉下面这行
-        # self.iconify()
-
         try:
             self.current_config = {key: float(entry.get()) for key, entry in self.entries.items()}
         except ValueError:
@@ -222,9 +217,6 @@ class App(tk.Tk):
         self.status_label.config(text="状态: 已停止", foreground="red")
         self.start_btn.config(state=tk.NORMAL)
         self.stop_btn.config(state=tk.DISABLED)
-        # 【修改】删除或注释掉下面这两行
-        # self.deiconify()
-        # self.attributes('-topmost', True)
 
     def on_closing(self):
         if self.is_running:
@@ -244,11 +236,17 @@ class App(tk.Tk):
             int(cfg['accept_area_y2']) - int(cfg['accept_area_y1'])
         )
 
-        # 【修改】使用 resource_path 加载模板图片
-        template_path = resource_path('accept_button_template.png')
+        # 【修改】使用新的路径函数加载模板
+        template_path = get_application_path('accept_button_template.png')
         template_image = cv2.imread(template_path, cv2.IMREAD_COLOR)
-        template_h, template_w, _ = template_image.shape
 
+        # 增加一个健壮性检查，如果图片加载失败则报错
+        if template_image is None:
+            print(f"[严重错误] 无法从路径 '{template_path}' 加载模板图片！")
+            self.after(0, self.stop_automation)  # 在主线程中安全地停止
+            return
+
+        template_h, template_w, _ = template_image.shape
         PIXEL_CHANGE_THRESHOLD = 100
 
         print("--- 自动化流程已启动 (终极优化版) ---")
