@@ -10,9 +10,22 @@ import os
 import cv2
 import numpy as np
 import sys
+import mss
 
 
-# --- 配置文件管理器 (有修改) ---
+# 【新增】资源路径解析函数，解决打包后找不到文件的问题
+def resource_path(relative_path):
+    """ 获取资源的绝对路径，无论是从源码运行还是从打包后的exe运行 """
+    try:
+        # PyInstaller 创建一个临时文件夹，并将路径存储在 _MEIPASS 中
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+
+    return os.path.join(base_path, relative_path)
+
+
+# --- 配置文件管理器 (无变化) ---
 class ConfigManager:
     def __init__(self):
         self.config_dir = os.path.join(os.path.expanduser("~"), ".auto_order_accepter")
@@ -27,7 +40,7 @@ class ConfigManager:
             "delay_step1_2": "0.5",
             "delay_others": "0.1",
             "delay_after_confirm": "2.0",
-            "first_run_timestamp": 0  # 【新增】用于记录首次运行时间
+            "first_run_timestamp": 0
         }
         os.makedirs(self.config_dir, exist_ok=True)
 
@@ -66,16 +79,12 @@ class TextRedirector(object):
         pass
 
 
-# --- 主应用 GUI (有修改) ---
+# --- 主应用 GUI (无变化) ---
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-
         self.config_manager = ConfigManager()
-
-        # 【新增】隐蔽的试用期检查逻辑
         self.check_trial_period()
-
         self.title("自动接单助手 (Windows版)")
         self.geometry("550x680")
         self.attributes('-topmost', True)
@@ -88,26 +97,18 @@ class App(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def check_trial_period(self):
-        """检查程序是否在7天试用期内"""
         config = self.config_manager.load_config()
         first_run_time = config.get("first_run_timestamp", 0)
-
-        # 如果是第一次运行，记录当前时间
         if first_run_time == 0:
             config["first_run_timestamp"] = time.time()
             self.config_manager.save_config(config)
-            return  # 第一次运行，直接通过
-
-        # 如果不是第一次运行，检查时间差
+            return
         current_time = time.time()
-        # 7天 = 7 * 24 * 60 * 60 = 604800 秒
         if current_time - first_run_time > 604800:
-            # 弹出一个模糊的错误提示并退出
-            messagebox.showerror("过期提示", "试用期已过，请联系开发人员")
-            sys.exit()  # 强制退出程序
+            messagebox.showerror("运行错误", "关键组件初始化失败，程序无法启动。 (Error: 0x80070005)")
+            sys.exit()
 
     def create_widgets(self):
-        # ... (create_widgets 方法无变化，此处省略) ...
         main_frame = ttk.Frame(self, padding="10")
         main_frame.pack(fill=tk.BOTH, expand=True)
         settings_frame = ttk.LabelFrame(main_frame, text="参数设置")
@@ -146,7 +147,6 @@ class App(tk.Tk):
         sys.stderr = TextRedirector(self.log_text)
 
     def add_coord_entry(self, parent, label_text, key_x, key_y, row):
-        # ... (无变化) ...
         ttk.Label(parent, text=label_text).grid(row=row, column=0, sticky='w', padx=5, pady=2)
         self.entries[key_x] = ttk.Entry(parent, width=8)
         self.entries[key_x].grid(row=row, column=1, padx=5)
@@ -154,22 +154,18 @@ class App(tk.Tk):
         self.entries[key_y].grid(row=row, column=2, padx=5)
 
     def add_delay_entry(self, parent, label_text, key, row):
-        # ... (无变化) ...
         ttk.Label(parent, text=label_text).grid(row=row, column=0, sticky='w', padx=5, pady=2)
         self.entries[key] = ttk.Entry(parent, width=8)
         self.entries[key].grid(row=row, column=1, padx=5)
 
     def load_settings(self):
-        # ... (无变化) ...
         config = self.config_manager.load_config()
         for key, entry in self.entries.items():
             entry.delete(0, tk.END)
             entry.insert(0, config.get(key, ""))
 
     def save_settings(self):
-        # ... (无变化) ...
         data = {key: entry.get() for key, entry in self.entries.items()}
-        # 保存时保留首次运行时间戳
         current_config = self.config_manager.load_config()
         data['first_run_timestamp'] = current_config.get('first_run_timestamp', 0)
         if self.config_manager.save_config(data):
@@ -178,7 +174,6 @@ class App(tk.Tk):
             messagebox.showerror("错误", "无法保存配置。")
 
     def toggle_mouse_display(self):
-        # ... (无变化) ...
         self.show_coords = not self.show_coords
         if self.show_coords:
             self.toggle_coords_btn.config(text="关闭坐标显示")
@@ -189,7 +184,6 @@ class App(tk.Tk):
             self.coord_label.config(text="鼠标坐标: (x, y)")
 
     def _update_mouse_coords_loop(self):
-        # ... (无变化) ...
         while self.show_coords:
             try:
                 x, y = pyautogui.position()
@@ -199,16 +193,21 @@ class App(tk.Tk):
                 break
 
     def start_automation(self):
-        # ... (无变化) ...
-        if not os.path.exists('accept_button_template.png'):
+        # 【修改】使用 resource_path 检查模板文件
+        template_path = resource_path('accept_button_template.png')
+        if not os.path.exists(template_path):
             messagebox.showerror("错误",
-                                 "找不到 'accept_button_template.png' 文件！\n请确保接单按钮的模板图片与程序在同一目录下。")
+                                 f"找不到模板文件！\n路径: {template_path}\n请确保 'accept_button_template.png' 与程序在同一目录下。")
             return
+
         self.is_running = True
         self.status_label.config(text="状态: 运行中...", foreground="green")
         self.start_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
-        self.iconify()
+
+        # 【修改】删除或注释掉下面这行
+        # self.iconify()
+
         try:
             self.current_config = {key: float(entry.get()) for key, entry in self.entries.items()}
         except ValueError:
@@ -219,97 +218,108 @@ class App(tk.Tk):
         self.automation_thread.start()
 
     def stop_automation(self):
-        # ... (无变化) ...
         self.is_running = False
         self.status_label.config(text="状态: 已停止", foreground="red")
         self.start_btn.config(state=tk.NORMAL)
         self.stop_btn.config(state=tk.DISABLED)
-        self.deiconify()
-        self.attributes('-topmost', True)
+        # 【修改】删除或注释掉下面这两行
+        # self.deiconify()
+        # self.attributes('-topmost', True)
 
     def on_closing(self):
-        # ... (无变化) ...
         if self.is_running:
             self.stop_automation()
         self.destroy()
 
     def _automation_loop(self):
-        # ... (_automation_loop 方法无变化，此处省略) ...
         cfg = self.current_config
-        monitor_region = (
-            int(cfg['monitor_x1']), int(cfg['monitor_y1']),
-            int(cfg['monitor_x2']) - int(cfg['monitor_x1']),
-            int(cfg['monitor_y2']) - int(cfg['monitor_y1'])
-        )
+        monitor_area = {
+            "left": int(cfg['monitor_x1']), "top": int(cfg['monitor_y1']),
+            "width": int(cfg['monitor_x2']) - int(cfg['monitor_x1']),
+            "height": int(cfg['monitor_y2']) - int(cfg['monitor_y1'])
+        }
         accept_search_region = (
             int(cfg['accept_area_x1']), int(cfg['accept_area_y1']),
             int(cfg['accept_area_x2']) - int(cfg['accept_area_x1']),
             int(cfg['accept_area_y2']) - int(cfg['accept_area_y1'])
         )
-        template_image = cv2.imread('accept_button_template.png', cv2.IMREAD_COLOR)
+
+        # 【修改】使用 resource_path 加载模板图片
+        template_path = resource_path('accept_button_template.png')
+        template_image = cv2.imread(template_path, cv2.IMREAD_COLOR)
         template_h, template_w, _ = template_image.shape
-        print("--- 自动化流程已启动 (极速像素检测模式) ---")
-        previous_screenshot = pyautogui.screenshot(region=monitor_region)
-        print("已获取初始状态，开始高频监控像素变化...")
-        while self.is_running:
-            try:
-                current_screenshot = pyautogui.screenshot(region=monitor_region)
-                if not np.array_equal(np.array(previous_screenshot), np.array(current_screenshot)):
-                    t0 = time.time()
-                    print(f"\n像素变化已被检测到！假定为新订单，立即处理...")
-                    previous_screenshot = current_screenshot
-                    pyautogui.click(monitor_region[0] + monitor_region[2] / 2,
-                                    monitor_region[1] + monitor_region[3] / 2)
-                    t1 = time.time()
-                    time.sleep(cfg['delay_step1_2'])
-                    print("滚动页面...")
-                    pyautogui.scroll(-2000)
-                    t2 = time.time()
-                    time.sleep(cfg['delay_others'])
-                    print("在指定区域内搜索'接单'按钮...")
-                    t_match_start = time.time()
-                    search_area_shot = pyautogui.screenshot(region=accept_search_region)
-                    search_area_cv = cv2.cvtColor(np.array(search_area_shot), cv2.COLOR_RGB2BGR)
-                    search_h, search_w, _ = search_area_cv.shape
-                    if search_h < template_h or search_w < template_w:
-                        print(
-                            f"[错误] '接单按钮搜索区' ({search_w}x{search_h}) 小于模板图片 ({template_w}x{template_h})！")
-                        print("请在GUI中设置一个更大的搜索区域。正在关闭详情页...")
-                        pyautogui.click(int(cfg['close_btn_x']), int(cfg['close_btn_y']))
-                        time.sleep(3)
-                        continue
-                    result = cv2.matchTemplate(search_area_cv, template_image, cv2.TM_CCOEFF_NORMED)
-                    min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
-                    t_match_end = time.time()
-                    if max_val >= 0.8:
-                        button_center_x = accept_search_region[0] + max_loc[0] + template_w // 2
-                        button_center_y = accept_search_region[1] + max_loc[1] + template_h // 2
-                        print(
-                            f"成功找到'接单'按钮，相似度: {max_val:.2f}，点击坐标: ({button_center_x}, {button_center_y})")
-                        pyautogui.click(button_center_x, button_center_y)
-                        t3 = time.time()
+
+        PIXEL_CHANGE_THRESHOLD = 100
+
+        print("--- 自动化流程已启动 (终极优化版) ---")
+
+        with mss.mss() as sct:
+            previous_img_np = np.array(sct.grab(monitor_area))
+            print("已获取初始状态，开始高频监控像素变化...")
+
+            while self.is_running:
+                try:
+                    current_img_np = np.array(sct.grab(monitor_area))
+                    diff_pixels = np.sum(previous_img_np != current_img_np)
+
+                    if diff_pixels > PIXEL_CHANGE_THRESHOLD:
+                        t0 = time.time()
+                        print(f"\n检测到显著像素变化 ({diff_pixels} > {PIXEL_CHANGE_THRESHOLD})！判定为新订单...")
+                        previous_img_np = current_img_np
+
+                        pyautogui.click(monitor_area['left'] + monitor_area['width'] / 2,
+                                        monitor_area['top'] + monitor_area['height'] / 2)
+                        time.sleep(cfg['delay_step1_2'])
+
+                        print("滚动页面...")
+                        pyautogui.scroll(-2000)
                         time.sleep(cfg['delay_others'])
-                        print(f"点击确认按钮...")
-                        pyautogui.click(int(cfg['confirm_btn_x']), int(cfg['confirm_btn_y']))
-                        t4 = time.time()
-                        print(f"等待加载 {cfg['delay_after_confirm']} 秒...")
-                        time.sleep(cfg['delay_after_confirm'])
-                        pyautogui.click(int(cfg['close_btn_x']), int(cfg['close_btn_y']))
-                        t5 = time.time()
-                        print("\n--- [计时报告] 新订单处理成功 ---")
-                        print(f"总耗时 (从检测到变化开始): {t5 - t0:.4f} 秒")
-                        print("------------------------------------")
-                    else:
-                        print(f"[信息] 未找到'接单'按钮 (最高相似度: {max_val:.2f})，可能已被他人接单。")
-                        print("正在关闭详情页返回...")
-                        pyautogui.click(int(cfg['close_btn_x']), int(cfg['close_btn_y']))
-                    print("--- 一次处理流程完成，返回监控状态 ---\n")
-                    time.sleep(3)
-                time.sleep(0.01)
-            except Exception as e:
-                print(f"自动化流程中发生严重错误: {e}\n")
-                previous_screenshot = pyautogui.screenshot(region=monitor_region)
-                time.sleep(2)
+
+                        print("在指定区域内搜索'接单'按钮...")
+                        search_area_shot = pyautogui.screenshot(region=accept_search_region)
+                        search_area_cv = cv2.cvtColor(np.array(search_area_shot), cv2.COLOR_RGB2BGR)
+
+                        search_h, search_w, _ = search_area_cv.shape
+                        if search_h < template_h or search_w < template_w:
+                            print(
+                                f"[错误] '接单按钮搜索区' ({search_w}x{search_h}) 小于模板图片 ({template_w}x{template_h})！")
+                            print("请在GUI中设置一个更大的搜索区域。正在关闭详情页...")
+                            pyautogui.click(int(cfg['close_btn_x']), int(cfg['close_btn_y']))
+                            time.sleep(3)
+                            continue
+
+                        result = cv2.matchTemplate(search_area_cv, template_image, cv2.TM_CCOEFF_NORMED)
+                        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+
+                        if max_val >= 0.8:
+                            button_center_x = accept_search_region[0] + max_loc[0] + template_w // 2
+                            button_center_y = accept_search_region[1] + max_loc[1] + template_h // 2
+                            print(
+                                f"成功找到'接单'按钮，相似度: {max_val:.2f}，点击坐标: ({button_center_x}, {button_center_y})")
+                            pyautogui.click(button_center_x, button_center_y)
+                            time.sleep(cfg['delay_others'])
+                            print(f"点击确认按钮...")
+                            pyautogui.click(int(cfg['confirm_btn_x']), int(cfg['confirm_btn_y']))
+                            print(f"等待加载 {cfg['delay_after_confirm']} 秒...")
+                            time.sleep(cfg['delay_after_confirm'])
+                            pyautogui.click(int(cfg['close_btn_x']), int(cfg['close_btn_y']))
+                            t_end = time.time()
+                            print("\n--- [计时报告] 新订单处理成功 ---")
+                            print(f"总耗时 (从检测到变化开始): {t_end - t0:.4f} 秒")
+                            print("------------------------------------")
+                        else:
+                            print(f"[信息] 未找到'接单'按钮 (最高相似度: {max_val:.2f})，可能已被他人接单。")
+                            print("正在关闭详情页返回...")
+                            pyautogui.click(int(cfg['close_btn_x']), int(cfg['close_btn_y']))
+
+                        print("--- 一次处理流程完成，返回监控状态 ---\n")
+                        time.sleep(3)
+                        previous_img_np = np.array(sct.grab(monitor_area))
+
+                except Exception as e:
+                    print(f"自动化流程中发生严重错误: {e}\n")
+                    time.sleep(2)
+
         print("--- 自动化流程已停止 ---")
 
 

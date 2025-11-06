@@ -35,7 +35,7 @@
 如果您需要从Python源码运行，请先安装所有必需的库。打开命令提示符(CMD)并运行：
 
 ```bash
-pip install pyautogui pillow pytesseract opencv-python numpy
+pip install pyautogui pillow pytesseract opencv-python numpy mss
 ```
 
 ## 使用说明
