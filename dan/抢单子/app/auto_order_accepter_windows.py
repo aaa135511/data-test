@@ -105,7 +105,7 @@ class App(tk.Tk):
             return
         current_time = time.time()
         if current_time - first_run_time > 604800:
-            messagebox.showerror("运行错误", "关键组件初始化失败，程序无法启动。 (Error: 0x80070005)")
+            messagebox.showerror("使用到期", "请联系管理员")
             sys.exit()
 
     def create_widgets(self):
