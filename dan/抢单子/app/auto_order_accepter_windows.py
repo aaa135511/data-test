@@ -13,16 +13,12 @@ import sys
 import mss
 
 
-# 【修改】使用新的路径函数，用于查找与exe同目录的资源
+# --- 路径函数 (无变化) ---
 def get_application_path(relative_path):
-    """ 获取可执行文件或脚本所在目录的资源路径 """
     if getattr(sys, 'frozen', False):
-        # 如果是打包后的exe
         application_path = os.path.dirname(sys.executable)
     else:
-        # 如果是直接运行的.py脚本
         application_path = os.path.dirname(os.path.abspath(__file__))
-
     return os.path.join(application_path, relative_path)
 
 
@@ -34,12 +30,12 @@ class ConfigManager:
         self.defaults = {
             "monitor_x1": "100", "monitor_y1": "800",
             "monitor_x2": "600", "monitor_y2": "1000",
-            "accept_area_x1": "200", "accept_area_y1": "600",
-            "accept_area_x2": "800", "accept_area_y2": "1000",
+            "accept_btn_x": "300", "accept_btn_y": "900",
             "confirm_btn_x": "500", "confirm_btn_y": "550",
             "close_btn_x": "900", "close_btn_y": "100",
-            "delay_step1_2": "0.5",
-            "delay_others": "0.1",
+            "delay_after_click_notify": "0.5",
+            "delay_after_scroll": "0.1",
+            "delay_after_accept": "0.1",
             "delay_after_confirm": "2.0",
             "first_run_timestamp": 0
         }
@@ -86,7 +82,7 @@ class App(tk.Tk):
         super().__init__()
         self.config_manager = ConfigManager()
         self.check_trial_period()
-        self.title("自动接单助手 (Windows版)")
+        self.title("自动接单助手 (极速版)")
         self.geometry("550x680")
         self.attributes('-topmost', True)
         self.entries = {}
@@ -106,7 +102,7 @@ class App(tk.Tk):
             return
         current_time = time.time()
         if current_time - first_run_time > 604800:
-            messagebox.showerror("使用到期", "请联系管理员")
+            messagebox.showerror("运行错误", "关键组件初始化失败，程序无法启动。 (Error: 0x80070005)")
             sys.exit()
 
     def create_widgets(self):
@@ -116,14 +112,14 @@ class App(tk.Tk):
         settings_frame.pack(fill=tk.X, pady=5)
         self.add_coord_entry(settings_frame, "监控区左上角 (x1, y1):", "monitor_x1", "monitor_y1", 0)
         self.add_coord_entry(settings_frame, "监控区右下角 (x2, y2):", "monitor_x2", "monitor_y2", 1)
-        self.add_coord_entry(settings_frame, "接单按钮搜索区 (x1, y1):", "accept_area_x1", "accept_area_y1", 2)
-        self.add_coord_entry(settings_frame, "接单按钮搜索区 (x2, y2):", "accept_area_x2", "accept_area_y2", 3)
-        self.add_coord_entry(settings_frame, "确认按钮坐标 (x, y):", "confirm_btn_x", "confirm_btn_y", 4)
-        self.add_coord_entry(settings_frame, "关闭按钮坐标 (x, y):", "close_btn_x", "close_btn_y", 5)
-        ttk.Separator(settings_frame, orient='horizontal').grid(row=6, columnspan=4, sticky='ew', pady=5)
-        self.add_delay_entry(settings_frame, "步骤1->2延时(秒):", "delay_step1_2", 7)
-        self.add_delay_entry(settings_frame, "其他步骤延时(秒):", "delay_others", 8)
-        self.add_delay_entry(settings_frame, "确认后延时(秒):", "delay_after_confirm", 9)
+        self.add_coord_entry(settings_frame, "接单按钮坐标 (x, y):", "accept_btn_x", "accept_btn_y", 2)
+        self.add_coord_entry(settings_frame, "确认按钮坐标 (x, y):", "confirm_btn_x", "confirm_btn_y", 3)
+        self.add_coord_entry(settings_frame, "关闭按钮坐标 (x, y):", "close_btn_x", "close_btn_y", 4)
+        ttk.Separator(settings_frame, orient='horizontal').grid(row=5, columnspan=4, sticky='ew', pady=5)
+        self.add_delay_entry(settings_frame, "点击通知后延时(秒):", "delay_after_click_notify", 6)
+        self.add_delay_entry(settings_frame, "滚动页面后延时(秒):", "delay_after_scroll", 7)
+        self.add_delay_entry(settings_frame, "点击接单后延时(秒):", "delay_after_accept", 8)
+        self.add_delay_entry(settings_frame, "点击确认后延时(秒):", "delay_after_confirm", 9)
         coords_frame = ttk.LabelFrame(main_frame, text="工具")
         coords_frame.pack(fill=tk.X, pady=10)
         self.coord_label = ttk.Label(coords_frame, text="鼠标坐标: (x, y)", font=("Helvetica", 12))
@@ -194,11 +190,6 @@ class App(tk.Tk):
                 break
 
     def start_automation(self):
-        template_path = get_application_path('accept_button_template.png')
-        if not os.path.exists(template_path):
-            messagebox.showerror("错误",
-                                 f"找不到模板文件！\n路径: {template_path}\n请确保 'accept_button_template.png' 与程序在同一目录下。")
-            return
         self.is_running = True
         self.status_label.config(text="状态: 运行中...", foreground="green")
         self.start_btn.config(state=tk.DISABLED)
@@ -230,30 +221,16 @@ class App(tk.Tk):
             "width": int(cfg['monitor_x2']) - int(cfg['monitor_x1']),
             "height": int(cfg['monitor_y2']) - int(cfg['monitor_y1'])
         }
-        accept_search_region = (
-            int(cfg['accept_area_x1']), int(cfg['accept_area_y1']),
-            int(cfg['accept_area_x2']) - int(cfg['accept_area_x1']),
-            int(cfg['accept_area_y2']) - int(cfg['accept_area_y1'])
-        )
-
-        # 【修改】使用新的路径函数加载模板
-        template_path = get_application_path('accept_button_template.png')
-        template_image = cv2.imread(template_path, cv2.IMREAD_COLOR)
-
-        # 增加一个健壮性检查，如果图片加载失败则报错
-        if template_image is None:
-            print(f"[严重错误] 无法从路径 '{template_path}' 加载模板图片！")
-            self.after(0, self.stop_automation)  # 在主线程中安全地停止
-            return
-
-        template_h, template_w, _ = template_image.shape
         PIXEL_CHANGE_THRESHOLD = 100
 
-        print("--- 自动化流程已启动 (终极优化版) ---")
+        print("--- 自动化流程已启动 (极速固定坐标版) ---")
 
         with mss.mss() as sct:
             previous_img_np = np.array(sct.grab(monitor_area))
             print("已获取初始状态，开始高频监控像素变化...")
+
+            # 【新增】用于记录上一次循环的时间点
+            last_loop_time = time.time()
 
             while self.is_running:
                 try:
@@ -261,58 +238,65 @@ class App(tk.Tk):
                     diff_pixels = np.sum(previous_img_np != current_img_np)
 
                     if diff_pixels > PIXEL_CHANGE_THRESHOLD:
-                        t0 = time.time()
-                        print(f"\n检测到显著像素变化 ({diff_pixels} > {PIXEL_CHANGE_THRESHOLD})！判定为新订单...")
+                        timestamps = {'t0_detected': time.time()}
+                        print(f"\n检测到像素变化 ({diff_pixels} > {PIXEL_CHANGE_THRESHOLD})！执行抢单...")
                         previous_img_np = current_img_np
 
                         pyautogui.click(monitor_area['left'] + monitor_area['width'] / 2,
                                         monitor_area['top'] + monitor_area['height'] / 2)
-                        time.sleep(cfg['delay_step1_2'])
+                        timestamps['t1_clicked_notify'] = time.time()
+                        time.sleep(cfg['delay_after_click_notify'])
+                        timestamps['t2_after_delay1'] = time.time()
 
-                        print("滚动页面...")
                         pyautogui.scroll(-2000)
-                        time.sleep(cfg['delay_others'])
+                        timestamps['t3_scrolled'] = time.time()
+                        time.sleep(cfg['delay_after_scroll'])
+                        timestamps['t4_after_delay2'] = time.time()
 
-                        print("在指定区域内搜索'接单'按钮...")
-                        search_area_shot = pyautogui.screenshot(region=accept_search_region)
-                        search_area_cv = cv2.cvtColor(np.array(search_area_shot), cv2.COLOR_RGB2BGR)
+                        pyautogui.click(int(cfg['accept_btn_x']), int(cfg['accept_btn_y']))
+                        timestamps['t5_clicked_accept'] = time.time()
+                        time.sleep(cfg['delay_after_accept'])
+                        timestamps['t6_after_delay3'] = time.time()
 
-                        search_h, search_w, _ = search_area_cv.shape
-                        if search_h < template_h or search_w < template_w:
-                            print(
-                                f"[错误] '接单按钮搜索区' ({search_w}x{search_h}) 小于模板图片 ({template_w}x{template_h})！")
-                            print("请在GUI中设置一个更大的搜索区域。正在关闭详情页...")
-                            pyautogui.click(int(cfg['close_btn_x']), int(cfg['close_btn_y']))
-                            time.sleep(3)
-                            continue
+                        pyautogui.click(int(cfg['confirm_btn_x']), int(cfg['confirm_btn_y']))
+                        timestamps['t7_clicked_confirm'] = time.time()
+                        time.sleep(cfg['delay_after_confirm'])
+                        timestamps['t8_after_delay4'] = time.time()
 
-                        result = cv2.matchTemplate(search_area_cv, template_image, cv2.TM_CCOEFF_NORMED)
-                        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+                        pyautogui.click(int(cfg['close_btn_x']), int(cfg['close_btn_y']))
+                        timestamps['t9_clicked_close'] = time.time()
 
-                        if max_val >= 0.8:
-                            button_center_x = accept_search_region[0] + max_loc[0] + template_w // 2
-                            button_center_y = accept_search_region[1] + max_loc[1] + template_h // 2
-                            print(
-                                f"成功找到'接单'按钮，相似度: {max_val:.2f}，点击坐标: ({button_center_x}, {button_center_y})")
-                            pyautogui.click(button_center_x, button_center_y)
-                            time.sleep(cfg['delay_others'])
-                            print(f"点击确认按钮...")
-                            pyautogui.click(int(cfg['confirm_btn_x']), int(cfg['confirm_btn_y']))
-                            print(f"等待加载 {cfg['delay_after_confirm']} 秒...")
-                            time.sleep(cfg['delay_after_confirm'])
-                            pyautogui.click(int(cfg['close_btn_x']), int(cfg['close_btn_y']))
-                            t_end = time.time()
-                            print("\n--- [计时报告] 新订单处理成功 ---")
-                            print(f"总耗时 (从检测到变化开始): {t_end - t0:.4f} 秒")
-                            print("------------------------------------")
-                        else:
-                            print(f"[信息] 未找到'接单'按钮 (最高相似度: {max_val:.2f})，可能已被他人接单。")
-                            print("正在关闭详情页返回...")
-                            pyautogui.click(int(cfg['close_btn_x']), int(cfg['close_btn_y']))
+                        # 【修改】更新计时报告
+                        print("\n--- [计时报告] 抢单流程完毕 ---")
+                        print(f" > 像素识别耗时:      {timestamps['t0_detected'] - last_loop_time:.4f} 秒")
+                        print(
+                            f" > 点击通知耗时:      {timestamps['t1_clicked_notify'] - timestamps['t0_detected']:.4f} 秒")
+                        print(
+                            f" > [等待] 加载详情页: {timestamps['t2_after_delay1'] - timestamps['t1_clicked_notify']:.4f} 秒 (设置值: {cfg['delay_after_click_notify']})")
+                        print(
+                            f" > 滚动页面耗时:      {timestamps['t3_scrolled'] - timestamps['t2_after_delay1']:.4f} 秒")
+                        print(
+                            f" > [等待] 滚动后延时: {timestamps['t4_after_delay2'] - timestamps['t3_scrolled']:.4f} 秒 (设置值: {cfg['delay_after_scroll']})")
+                        print(
+                            f" > 点击接单耗时:      {timestamps['t5_clicked_accept'] - timestamps['t4_after_delay2']:.4f} 秒")
+                        print(
+                            f" > [等待] 接单后延时: {timestamps['t6_after_delay3'] - timestamps['t5_clicked_accept']:.4f} 秒 (设置值: {cfg['delay_after_accept']})")
+                        print(
+                            f" > 点击确认耗时:      {timestamps['t7_clicked_confirm'] - timestamps['t6_after_delay3']:.4f} 秒")
+                        print(
+                            f" > [等待] 确认后加载: {timestamps['t8_after_delay4'] - timestamps['t7_clicked_confirm']:.4f} 秒 (设置值: {cfg['delay_after_confirm']})")
+                        print(
+                            f" > 点击关闭耗时:      {timestamps['t9_clicked_close'] - timestamps['t8_after_delay4']:.4f} 秒")
+                        print("------------------------------------")
+                        print(
+                            f" >> 总耗时 (从上轮检测结束到本轮关闭): {timestamps['t9_clicked_close'] - last_loop_time:.4f} 秒 <<")
 
-                        print("--- 一次处理流程完成，返回监控状态 ---\n")
+                        print("\n--- 返回监控状态 ---\n")
                         time.sleep(3)
                         previous_img_np = np.array(sct.grab(monitor_area))
+
+                    # 【修改】在每次循环结束后，更新时间戳
+                    last_loop_time = time.time()
 
                 except Exception as e:
                     print(f"自动化流程中发生严重错误: {e}\n")
