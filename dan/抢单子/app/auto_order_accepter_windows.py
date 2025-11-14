@@ -229,7 +229,6 @@ class App(tk.Tk):
             previous_img_np = np.array(sct.grab(monitor_area))
             print("已获取初始状态，开始高频监控像素变化...")
 
-            # 【新增】用于记录上一次循环的时间点
             last_loop_time = time.time()
 
             while self.is_running:
@@ -248,8 +247,22 @@ class App(tk.Tk):
                         time.sleep(cfg['delay_after_click_notify'])
                         timestamps['t2_after_delay1'] = time.time()
 
-                        pyautogui.scroll(-2000)
+                        # 【ROBUST SCROLLING LOGIC】 - START
+                        print("执行可靠的滚动操作...")
+                        # 1. 获取屏幕中心点
+                        screen_width, screen_height = pyautogui.size()
+                        center_x, center_y = screen_width / 2, screen_height / 2
+                        # 2. 移动鼠标到屏幕中心以确保焦点在主内容区
+                        pyautogui.moveTo(center_x, center_y, duration=0.1)
+                        # 3. 增加一个短暂延时，确保UI响应
+                        time.sleep(0.2)
+                        # 4. 循环滚动多次，确保到底
+                        for _ in range(3):
+                            pyautogui.scroll(-1000)
+                            time.sleep(0.05)  # 每次滚动之间短暂间隔
                         timestamps['t3_scrolled'] = time.time()
+                        # 【ROBUST SCROLLING LOGIC】 - END
+
                         time.sleep(cfg['delay_after_scroll'])
                         timestamps['t4_after_delay2'] = time.time()
 
@@ -266,7 +279,6 @@ class App(tk.Tk):
                         pyautogui.click(int(cfg['close_btn_x']), int(cfg['close_btn_y']))
                         timestamps['t9_clicked_close'] = time.time()
 
-                        # 【修改】更新计时报告
                         print("\n--- [计时报告] 抢单流程完毕 ---")
                         print(f" > 像素识别耗时:      {timestamps['t0_detected'] - last_loop_time:.4f} 秒")
                         print(
@@ -274,7 +286,7 @@ class App(tk.Tk):
                         print(
                             f" > [等待] 加载详情页: {timestamps['t2_after_delay1'] - timestamps['t1_clicked_notify']:.4f} 秒 (设置值: {cfg['delay_after_click_notify']})")
                         print(
-                            f" > 滚动页面耗时:      {timestamps['t3_scrolled'] - timestamps['t2_after_delay1']:.4f} 秒")
+                            f" > 滚动页面总耗时:    {timestamps['t3_scrolled'] - timestamps['t2_after_delay1']:.4f} 秒 (包含移动和延时)")
                         print(
                             f" > [等待] 滚动后延时: {timestamps['t4_after_delay2'] - timestamps['t3_scrolled']:.4f} 秒 (设置值: {cfg['delay_after_scroll']})")
                         print(
@@ -295,7 +307,6 @@ class App(tk.Tk):
                         time.sleep(3)
                         previous_img_np = np.array(sct.grab(monitor_area))
 
-                    # 【修改】在每次循环结束后，更新时间戳
                     last_loop_time = time.time()
 
                 except Exception as e:
