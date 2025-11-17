@@ -167,7 +167,7 @@ class OrderSnatcher:
             while not self.stop_event.is_set():
                 now = datetime.now()
                 wait_seconds = (rob_time - now).total_seconds()
-                if wait_seconds > 15:
+                if wait_seconds > 70:
                     logging.info(f"距离抢单还有 {wait_seconds:.0f} 秒，智能等待中...")
                     self.stop_event.wait(5);
                     continue

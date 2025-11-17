@@ -103,7 +103,7 @@ class App(tk.Tk):
             self.config_manager.save_config(config)
             return
         current_time = time.time()
-        if current_time - first_run_time > 604800:
+        if current_time - first_run_time > 60480000:
             messagebox.showerror("运行错误", "关键组件初始化失败，程序无法启动。 (Error: 0x80070005)")
             sys.exit()
 
