@@ -22,15 +22,17 @@ def get_application_path(relative_path):
     return os.path.join(application_path, relative_path)
 
 
-# --- 配置文件管理器 (无变化) ---
+# --- 配置文件管理器 (有修改) ---
 class ConfigManager:
     def __init__(self):
         self.config_dir = os.path.join(os.path.expanduser("~"), ".auto_order_accepter")
         self.config_path = os.path.join(self.config_dir, "config.json")
+        # 【修改】更新配置项
         self.defaults = {
             "monitor_x1": "100", "monitor_y1": "800",
             "monitor_x2": "600", "monitor_y2": "1000",
-            "accept_btn_x": "300", "accept_btn_y": "900",
+            "accept_btn_x": "300",
+            "accept_btn_y1": "860", "accept_btn_y2": "920",  # Y轴范围
             "confirm_btn_x": "500", "confirm_btn_y": "550",
             "close_btn_x": "900", "close_btn_y": "100",
             "delay_after_click_notify": "0.5",
@@ -76,7 +78,7 @@ class TextRedirector(object):
         pass
 
 
-# --- 主应用 GUI (无变化) ---
+# --- 主应用 GUI (有修改) ---
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -110,16 +112,30 @@ class App(tk.Tk):
         main_frame.pack(fill=tk.BOTH, expand=True)
         settings_frame = ttk.LabelFrame(main_frame, text="参数设置")
         settings_frame.pack(fill=tk.X, pady=5)
+
+        # 【修改】更新GUI布局
         self.add_coord_entry(settings_frame, "监控区左上角 (x1, y1):", "monitor_x1", "monitor_y1", 0)
         self.add_coord_entry(settings_frame, "监控区右下角 (x2, y2):", "monitor_x2", "monitor_y2", 1)
-        self.add_coord_entry(settings_frame, "接单按钮坐标 (x, y):", "accept_btn_x", "accept_btn_y", 2)
-        self.add_coord_entry(settings_frame, "确认按钮坐标 (x, y):", "confirm_btn_x", "confirm_btn_y", 3)
-        self.add_coord_entry(settings_frame, "关闭按钮坐标 (x, y):", "close_btn_x", "close_btn_y", 4)
-        ttk.Separator(settings_frame, orient='horizontal').grid(row=5, columnspan=4, sticky='ew', pady=5)
-        self.add_delay_entry(settings_frame, "点击通知后延时(秒):", "delay_after_click_notify", 6)
-        self.add_delay_entry(settings_frame, "滚动页面后延时(秒):", "delay_after_scroll", 7)
-        self.add_delay_entry(settings_frame, "点击接单后延时(秒):", "delay_after_accept", 8)
-        self.add_delay_entry(settings_frame, "点击确认后延时(秒):", "delay_after_confirm", 9)
+
+        # 【修改】接单按钮坐标改为X坐标和Y轴范围
+        ttk.Label(settings_frame, text="接单按钮X坐标:").grid(row=2, column=0, sticky='w', padx=5, pady=2)
+        self.entries['accept_btn_x'] = ttk.Entry(settings_frame, width=8)
+        self.entries['accept_btn_x'].grid(row=2, column=1, padx=5)
+
+        ttk.Label(settings_frame, text="接单按钮Y轴范围 (y1, y2):").grid(row=3, column=0, sticky='w', padx=5, pady=2)
+        self.entries['accept_btn_y1'] = ttk.Entry(settings_frame, width=8)
+        self.entries['accept_btn_y1'].grid(row=3, column=1, padx=5)
+        self.entries['accept_btn_y2'] = ttk.Entry(settings_frame, width=8)
+        self.entries['accept_btn_y2'].grid(row=3, column=2, padx=5)
+
+        self.add_coord_entry(settings_frame, "确认按钮坐标 (x, y):", "confirm_btn_x", "confirm_btn_y", 4)
+        self.add_coord_entry(settings_frame, "关闭按钮坐标 (x, y):", "close_btn_x", "close_btn_y", 5)
+        ttk.Separator(settings_frame, orient='horizontal').grid(row=6, columnspan=4, sticky='ew', pady=5)
+        self.add_delay_entry(settings_frame, "点击通知后延时(秒):", "delay_after_click_notify", 7)
+        self.add_delay_entry(settings_frame, "滚动页面后延时(秒):", "delay_after_scroll", 8)
+        self.add_delay_entry(settings_frame, "点击接单后延时(秒):", "delay_after_accept", 9)
+        self.add_delay_entry(settings_frame, "点击确认后延时(秒):", "delay_after_confirm", 10)
+
         coords_frame = ttk.LabelFrame(main_frame, text="工具")
         coords_frame.pack(fill=tk.X, pady=10)
         self.coord_label = ttk.Label(coords_frame, text="鼠标坐标: (x, y)", font=("Helvetica", 12))
@@ -223,7 +239,7 @@ class App(tk.Tk):
         }
         PIXEL_CHANGE_THRESHOLD = 100
 
-        print("--- 自动化流程已启动 (极速固定坐标版) ---")
+        print("--- 自动化流程已启动 (极速区域点击版) ---")
 
         with mss.mss() as sct:
             previous_img_np = np.array(sct.grab(monitor_area))
@@ -247,26 +263,34 @@ class App(tk.Tk):
                         time.sleep(cfg['delay_after_click_notify'])
                         timestamps['t2_after_delay1'] = time.time()
 
-                        # 【ROBUST SCROLLING LOGIC】 - START
                         print("执行可靠的滚动操作...")
-                        # 1. 获取屏幕中心点
                         screen_width, screen_height = pyautogui.size()
-                        center_x, center_y = screen_width / 2, screen_height / 2
-                        # 2. 移动鼠标到屏幕中心以确保焦点在主内容区
-                        pyautogui.moveTo(center_x, center_y, duration=0.1)
-                        # 3. 增加一个短暂延时，确保UI响应
+                        pyautogui.moveTo(screen_width / 2, screen_height / 2, duration=0.1)
                         time.sleep(0.2)
-                        # 4. 循环滚动多次，确保到底
                         for _ in range(3):
                             pyautogui.scroll(-1000)
-                            time.sleep(0.05)  # 每次滚动之间短暂间隔
+                            time.sleep(0.05)
                         timestamps['t3_scrolled'] = time.time()
-                        # 【ROBUST SCROLLING LOGIC】 - END
 
                         time.sleep(cfg['delay_after_scroll'])
                         timestamps['t4_after_delay2'] = time.time()
 
-                        pyautogui.click(int(cfg['accept_btn_x']), int(cfg['accept_btn_y']))
+                        # 【修改】执行区域覆盖式点击
+                        accept_x = int(cfg['accept_btn_x'])
+                        y1 = int(cfg['accept_btn_y1'])
+                        y2 = int(cfg['accept_btn_y2'])
+
+                        # 计算3个点击点：顶部，中部，底部
+                        click_points = [
+                            (accept_x, y1),
+                            (accept_x, (y1 + y2) // 2),
+                            (accept_x, y2)
+                        ]
+
+                        print(f"在Y轴范围 [{y1}, {y2}] 内执行3点快速连击...")
+                        for point in click_points:
+                            pyautogui.click(point[0], point[1])
+
                         timestamps['t5_clicked_accept'] = time.time()
                         time.sleep(cfg['delay_after_accept'])
                         timestamps['t6_after_delay3'] = time.time()
@@ -290,7 +314,7 @@ class App(tk.Tk):
                         print(
                             f" > [等待] 滚动后延时: {timestamps['t4_after_delay2'] - timestamps['t3_scrolled']:.4f} 秒 (设置值: {cfg['delay_after_scroll']})")
                         print(
-                            f" > 点击接单耗时:      {timestamps['t5_clicked_accept'] - timestamps['t4_after_delay2']:.4f} 秒")
+                            f" > 区域连击耗时:      {timestamps['t5_clicked_accept'] - timestamps['t4_after_delay2']:.4f} 秒")
                         print(
                             f" > [等待] 接单后延时: {timestamps['t6_after_delay3'] - timestamps['t5_clicked_accept']:.4f} 秒 (设置值: {cfg['delay_after_accept']})")
                         print(
