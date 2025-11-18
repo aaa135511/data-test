@@ -21,10 +21,7 @@ try:
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.chrome.service import Service as ChromeService
 except ImportError as e:
-    # 在GUI启动前，错误只能打印到控制台
     print(f"--- [严重错误] 缺少必要的库: {e} ---")
-    print(f"--- [提示] 请确保已安装: pip install selenium requests pyautogui Pillow ---")
-    # 如果是在打包后的环境中，可以尝试用弹窗提示
     try:
         root = tk.Tk()
         root.withdraw()
@@ -67,7 +64,7 @@ class ConfigManager:
 
 
 # ==================================================================
-# 2. 核心抢单逻辑 (OrderSnatcher 类 - 保持不变)
+# 2. 核心抢单逻辑 (OrderSnatcher 类)
 # ==================================================================
 class OrderSnatcher:
     BASE_URL = "http://222.132.55.178:8190"
@@ -79,6 +76,7 @@ class OrderSnatcher:
         self.weight = order_data["weight"]
         self.quantity = order_data["quantity"]
         self.screenshot_delay = order_data["screenshot_delay"]
+        self.refresh_advance_time = order_data["refresh_advance_time"]  # 新增
         self.username = login_info["username"]
         self.password = login_info["password"]
         self.jfybm_token = api_token
@@ -103,6 +101,7 @@ class OrderSnatcher:
             logging.info("[诊断] WebDriver 初始化成功")
         except Exception as e:
             logging.error(f"❌ [严重错误] 在初始化WebDriver时发生致命错误: {e}")
+            if self.driver: self.driver.quit()
             raise
 
     def login(self):
@@ -167,12 +166,25 @@ class OrderSnatcher:
             while not self.stop_event.is_set():
                 now = datetime.now()
                 wait_seconds = (rob_time - now).total_seconds()
-                if wait_seconds > 70:
+                if wait_seconds > self.refresh_advance_time:
                     logging.info(f"距离抢单还有 {wait_seconds:.0f} 秒，智能等待中...")
                     self.stop_event.wait(5);
                     continue
                 logging.info(f"进入最后 {wait_seconds:.1f} 秒，开始高频刷新捕捉抢单按钮！")
                 self.driver.refresh()
+                try:
+                    health_check_wait = WebDriverWait(self.driver, 2)
+                    health_check_wait.until(
+                        EC.presence_of_element_located((By.XPATH, "//button[contains(text(), '查询')]")))
+                except TimeoutException:
+                    logging.error("页面健康检查失败！检测到页面可能已崩溃。")
+                    logging.info("正在尝试通过URL重新导航以恢复...")
+                    try:
+                        self.navigate_to_order_page()
+                        logging.info("页面恢复成功！继续执行抢单流程。")
+                    except Exception as e:
+                        logging.error(f"页面恢复失败: {e}，将跳过本次循环。")
+                    continue
                 try:
                     short_wait = WebDriverWait(self.driver, 1.5)
                     rob_link = short_wait.until(EC.element_to_be_clickable((By.XPATH, rob_link_xpath)))
@@ -188,7 +200,14 @@ class OrderSnatcher:
             logging.error(f"抢单主流程发生错误: {e}")
             if self.driver: self.driver.save_screenshot("main_error.png")
         finally:
-            if self.driver: logging.info("流程结束，浏览器将自动关闭。"); self.driver.quit()
+            # --- 【已优化】确保 driver.quit() 被干净地执行 ---
+            if self.driver:
+                logging.info("流程结束，正在关闭浏览器...")
+                try:
+                    self.driver.quit()
+                    logging.info("浏览器已成功关闭。")
+                except Exception as e:
+                    logging.warning(f"关闭浏览器时发生错误: {e}")
 
     def handle_robbery_steps(self):
         logging.info("✅ 已点击抢单链接！")
@@ -234,12 +253,12 @@ class OrderSnatcher:
 
 
 # ==================================================================
-# 3. GUI 界面逻辑 (保持不变)
+# 3. GUI 界面逻辑
 # ==================================================================
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title("潍钢抢单助手 V1.0 (试用版)")
+        self.root.title("潍钢抢单助手 V7.2 (生产版)")
         self.root.geometry("650x750")
         self.snatcher_thread = None
         self.stop_event = threading.Event()
@@ -270,6 +289,7 @@ class App:
         self.confirm_x = tk.StringVar()
         self.confirm_y = tk.StringVar()
         self.screenshot_delay = tk.StringVar()
+        self.refresh_advance_time = tk.StringVar()  # 新增
         self.mouse_pos = tk.StringVar(value="鼠标坐标: (-, -)")
         row = 0
         ttk.Label(params_frame, text="网站账号:").grid(row=row, column=0, sticky=tk.W, padx=5, pady=3)
@@ -296,6 +316,10 @@ class App:
         row += 1
         ttk.Label(params_frame, text="截图前延时(秒):").grid(row=row, column=0, sticky=tk.W, padx=5, pady=3)
         ttk.Entry(params_frame, textvariable=self.screenshot_delay).grid(row=row, column=1, sticky=tk.EW)
+        # --- 【新增】提前刷新时间输入框 ---
+        ttk.Label(params_frame, text="提前刷新(秒):").grid(row=row, column=2, sticky=tk.W, padx=5, pady=3)
+        ttk.Entry(params_frame, textvariable=self.refresh_advance_time).grid(row=row, column=3, sticky=tk.EW)
+
         coords_frame = ttk.LabelFrame(main_frame, text="坐标拾取工具", padding="10")
         coords_frame.pack(fill=tk.X, pady=10)
         pos_label = ttk.Label(coords_frame, textvariable=self.mouse_pos, font=("", 12, "bold"), foreground="blue")
@@ -394,7 +418,8 @@ class App:
         try:
             order_data = {
                 "order_id": self.order_id.get(), "weight": self.weight.get(), "quantity": self.quantity.get(),
-                "screenshot_delay": float(self.screenshot_delay.get())
+                "screenshot_delay": float(self.screenshot_delay.get()),
+                "refresh_advance_time": int(self.refresh_advance_time.get())
             }
             login_info = {"username": self.username.get(), "password": self.password.get()}
             api_token = self.api_token.get()
@@ -448,6 +473,7 @@ class App:
         self.confirm_x.set(config.get("confirm_x", "920"))
         self.confirm_y.set(config.get("confirm_y", "740"))
         self.screenshot_delay.set(config.get("screenshot_delay", "1.5"))
+        self.refresh_advance_time.set(config.get("refresh_advance_time", "15"))  # 新增
         logging.info("已从本地加载配置（或使用默认值）。")
 
     def save_settings(self):
@@ -458,7 +484,8 @@ class App:
             "x1": self.x1.get(), "y1": self.y1.get(),
             "x2": self.x2.get(), "y2": self.y2.get(),
             "confirm_x": self.confirm_x.get(), "confirm_y": self.confirm_y.get(),
-            "screenshot_delay": self.screenshot_delay.get()
+            "screenshot_delay": self.screenshot_delay.get(),
+            "refresh_advance_time": self.refresh_advance_time.get()  # 新增
         }
         self.config_manager.save_config(config)
 
@@ -496,10 +523,8 @@ def check_trial_period():
         start_time = datetime.strptime("2025-11-17 12:00:00", "%Y-%m-%d %H:%M:%S")
         end_time = datetime.strptime("2025-11-24 12:00:00", "%Y-%m-%d %H:%M:%S")
         now = datetime.now()
-
         if not (start_time <= now <= end_time):
             return False, f"试用期已于 {end_time.strftime('%Y-%m-%d %H:%M')} 结束。"
-
         remaining_time = end_time - now
         return True, f"试用期剩余: {remaining_time.days} 天 {remaining_time.seconds // 3600} 小时"
     except Exception:
@@ -507,32 +532,23 @@ def check_trial_period():
 
 
 if __name__ == "__main__":
-    # --- 【新增】试用期检查 ---
     is_valid, message = check_trial_period()
-
-    # 创建一个临时的 Tkinter 根窗口来显示消息
     temp_root = tk.Tk()
-    temp_root.withdraw()  # 隐藏主窗口
-
+    temp_root.withdraw()
     if not is_valid:
         messagebox.showerror("试用结束", message + "\n请联系软件提供商获取正式版。")
         temp_root.destroy()
         sys.exit()
-
-    # 如果试用期有效，销毁临时窗口，继续正常流程
     temp_root.destroy()
 
-    # --- PyInstaller 打包兼容性 ---
     if getattr(sys, 'frozen', False):
         if sys.platform == 'win32':
             __import__("pyautogui._pyautogui_win")
         elif sys.platform == 'darwin':
             __import__("pyautogui._pyautogui_osx")
 
-    # --- 启动主程序 ---
     root = tk.Tk()
     app = App(root)
-    # 在窗口标题中显示试用期信息
     original_title = app.root.title()
     app.root.title(f"{original_title} - [{message}]")
     root.mainloop()
