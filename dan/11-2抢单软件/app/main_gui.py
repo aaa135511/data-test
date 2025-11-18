@@ -72,17 +72,25 @@ class OrderSnatcher:
     JFYBM_CAPTCHA_TYPE = "30340"
 
     def __init__(self, order_data, login_info, api_token, captcha_coords, stop_event):
+        self.order_data = order_data
+        self.login_info = login_info
+        self.api_token = api_token
+        self.captcha_coords = captcha_coords
+        self.stop_event = stop_event
+        self.driver = None
+        self.wait = None
+        # 将配置参数解包到 self
         self.order_id = order_data["order_id"]
         self.weight = order_data["weight"]
         self.quantity = order_data["quantity"]
         self.screenshot_delay = order_data["screenshot_delay"]
-        self.refresh_advance_time = order_data["refresh_advance_time"]  # 新增
+        self.refresh_advance_time = order_data["refresh_advance_time"]
         self.username = login_info["username"]
         self.password = login_info["password"]
         self.jfybm_token = api_token
-        self.captcha_coords = captcha_coords
-        self.driver = None
-        self.stop_event = stop_event
+
+    def _create_driver(self):
+        """创建一个新的 WebDriver 实例"""
         try:
             if getattr(sys, 'frozen', False):
                 base_path = sys._MEIPASS
@@ -99,10 +107,22 @@ class OrderSnatcher:
             self.driver = webdriver.Chrome(service=service, options=options)
             self.wait = WebDriverWait(self.driver, 10)
             logging.info("[诊断] WebDriver 初始化成功")
+            return True
         except Exception as e:
             logging.error(f"❌ [严重错误] 在初始化WebDriver时发生致命错误: {e}")
-            if self.driver: self.driver.quit()
-            raise
+            return False
+
+    def _quit_driver(self):
+        """安全地关闭 WebDriver 实例"""
+        if self.driver:
+            try:
+                self.driver.quit()
+                logging.info("浏览器已成功关闭。")
+            except Exception as e:
+                logging.warning(f"关闭浏览器时发生错误: {e}")
+            finally:
+                self.driver = None
+                self.wait = None
 
     def login(self):
         logging.info("正在打开登录页面...")
@@ -125,6 +145,7 @@ class OrderSnatcher:
         return True
 
     def _solve_captcha(self, image_bytes):
+        # ... (此方法保持不变)
         logging.info("开始请求 jfbym.com 【定制 API - 30340】服务...")
         base64_image = base64.b64encode(image_bytes).decode('utf-8')
         payload = {'image': base64_image, 'token': self.jfybm_token, 'type': self.JFYBM_CAPTCHA_TYPE}
@@ -143,73 +164,91 @@ class OrderSnatcher:
         return [{'x': int(p.split(',')[0]), 'y': int(p.split(',')[1])} for p in coordinates_str.split('|')]
 
     def run(self):
-        try:
-            if not self.login() or not self.navigate_to_order_page(): return
-            logging.info(f"正在页面上寻找订单 {self.order_id} 并获取抢单时间...")
-            rob_time_str = None
-            title_row_xpath = f"//tr[contains(., '货源单号：{self.order_id}')]"
-            time_element_relative_xpath = "./following-sibling::tr[1]//span[preceding-sibling::em[text()='抢单开始时间：']]"
-            while not self.stop_event.is_set():
-                try:
-                    title_row = self.wait.until(EC.presence_of_element_located((By.XPATH, title_row_xpath)))
-                    time_element = title_row.find_element(By.XPATH, time_element_relative_xpath)
-                    rob_time_str = time_element.text
-                    if rob_time_str: logging.info(f"✅ 成功获取抢单时间: {rob_time_str}"); break
-                except Exception:
-                    logging.warning(f"未在当前页面找到订单 {self.order_id}，将在3秒后刷新重试...")
-                    self.stop_event.wait(3)
-                    if self.stop_event.is_set(): return
-                    self.driver.refresh()
-            rob_time = datetime.strptime(rob_time_str, "%Y-%m-%d %H:%M:%S")
-            logging.info(f"🎯 目标订单: {self.order_id}, 自动设定抢单时间: {rob_time_str}")
-            rob_link_xpath = f"//tr[contains(., '货源单号：{self.order_id}')]/following-sibling::tr[1]//a[text()='抢单']"
-            while not self.stop_event.is_set():
-                now = datetime.now()
-                wait_seconds = (rob_time - now).total_seconds()
-                if wait_seconds > self.refresh_advance_time:
-                    logging.info(f"距离抢单还有 {wait_seconds:.0f} 秒，智能等待中...")
-                    self.stop_event.wait(5);
-                    continue
-                logging.info(f"进入最后 {wait_seconds:.1f} 秒，开始高频刷新捕捉抢单按钮！")
+        """主运行函数，包含重启机制"""
+        max_retries = 3
+        for attempt in range(max_retries):
+            if self.stop_event.is_set():
+                logging.warning("任务被用户手动停止。");
+                break
+
+            try:
+                logging.info(f"--- 开始第 {attempt + 1}/{max_retries} 次抢单尝试 ---")
+                if not self._create_driver(): return  # 创建 driver
+
+                if not self.login() or not self.navigate_to_order_page():
+                    self._quit_driver();
+                    continue  # 如果登录或导航失败，重启
+
+                # 核心抢单循环
+                success = self._snatching_loop()
+                if success:
+                    logging.info("🎉🎉🎉 抢单流程执行完毕！ 🎉🎉🎉")
+                    break  # 成功则跳出重试循环
+
+            except Exception as e:
+                logging.error(f"第 {attempt + 1} 次尝试中发生严重错误: {e}")
+                if self.driver: self.driver.save_screenshot(f"main_error_attempt_{attempt + 1}.png")
+            finally:
+                self._quit_driver()  # 每次尝试结束后都清理 driver
+        else:
+            logging.error(f"已达到最大重试次数 ({max_retries}次)，任务终止。")
+
+    def _snatching_loop(self):
+        """包含自动获取时间、智能刷新和抢单的内部循环"""
+        logging.info(f"正在页面上寻找订单 {self.order_id} 并获取抢单时间...")
+        rob_time_str = None
+        title_row_xpath = f"//tr[contains(., '货源单号：{self.order_id}')]"
+        time_element_relative_xpath = "./following-sibling::tr[1]//span[preceding-sibling::em[text()='抢单开始时间：']]"
+        while not self.stop_event.is_set():
+            try:
+                title_row = self.wait.until(EC.presence_of_element_located((By.XPATH, title_row_xpath)))
+                time_element = title_row.find_element(By.XPATH, time_element_relative_xpath)
+                rob_time_str = time_element.text
+                if rob_time_str: logging.info(f"✅ 成功获取抢单时间: {rob_time_str}"); break
+            except Exception:
+                logging.warning(f"未在当前页面找到订单 {self.order_id}，将在3秒后刷新重试...")
+                self.stop_event.wait(3)
+                if self.stop_event.is_set(): return False
                 self.driver.refresh()
-                try:
-                    health_check_wait = WebDriverWait(self.driver, 2)
-                    health_check_wait.until(
-                        EC.presence_of_element_located((By.XPATH, "//button[contains(text(), '查询')]")))
-                except TimeoutException:
-                    logging.error("页面健康检查失败！检测到页面可能已崩溃。")
-                    logging.info("正在尝试通过URL重新导航以恢复...")
-                    try:
-                        self.navigate_to_order_page()
-                        logging.info("页面恢复成功！继续执行抢单流程。")
-                    except Exception as e:
-                        logging.error(f"页面恢复失败: {e}，将跳过本次循环。")
-                    continue
-                try:
-                    short_wait = WebDriverWait(self.driver, 1.5)
-                    rob_link = short_wait.until(EC.element_to_be_clickable((By.XPATH, rob_link_xpath)))
-                    logging.info("🔥🔥🔥 抢单按钮已捕获，立即抢占！ 🔥🔥🔥")
-                    rob_link.click()
-                    self.handle_robbery_steps()
-                    return
-                except TimeoutException:
-                    if wait_seconds <= -2: logging.error("抢单时间已过超过2秒，按钮仍未出现，任务终止。"); return
-                    continue
-            if self.stop_event.is_set(): logging.warning("任务被用户手动停止。"); return
-        except Exception as e:
-            logging.error(f"抢单主流程发生错误: {e}")
-            if self.driver: self.driver.save_screenshot("main_error.png")
-        finally:
-            # --- 【已优化】确保 driver.quit() 被干净地执行 ---
-            if self.driver:
-                logging.info("流程结束，正在关闭浏览器...")
-                try:
-                    self.driver.quit()
-                    logging.info("浏览器已成功关闭。")
-                except Exception as e:
-                    logging.warning(f"关闭浏览器时发生错误: {e}")
+
+        rob_time = datetime.strptime(rob_time_str, "%Y-%m-%d %H:%M:%S")
+        logging.info(f"🎯 目标订单: {self.order_id}, 自动设定抢单时间: {rob_time_str}")
+        rob_link_xpath = f"//tr[contains(., '货源单号：{self.order_id}')]/following-sibling::tr[1]//a[text()='抢单']"
+
+        while not self.stop_event.is_set():
+            now = datetime.now()
+            wait_seconds = (rob_time - now).total_seconds()
+            if wait_seconds > self.refresh_advance_time:
+                logging.info(f"距离抢单还有 {wait_seconds:.0f} 秒，智能等待中...")
+                self.stop_event.wait(5);
+                continue
+
+            logging.info(f"进入最后 {wait_seconds:.1f} 秒，开始高频刷新捕捉抢单按钮！")
+            self.driver.refresh()
+
+            try:
+                health_check_wait = WebDriverWait(self.driver, 2)
+                health_check_wait.until(
+                    EC.presence_of_element_located((By.XPATH, "//button[contains(text(), '查询')]")))
+            except TimeoutException:
+                logging.error("页面健康检查失败！检测到页面已崩溃，将触发浏览器重启。")
+                return False  # 返回 False，让外层循环知道需要重启
+
+            try:
+                short_wait = WebDriverWait(self.driver, 1.5)
+                rob_link = short_wait.until(EC.element_to_be_clickable((By.XPATH, rob_link_xpath)))
+                logging.info("🔥🔥🔥 抢单按钮已捕获，立即抢占！ 🔥🔥🔥")
+                rob_link.click()
+                self.handle_robbery_steps()
+                return True  # 抢单流程执行完毕，返回 True
+            except TimeoutException:
+                if wait_seconds <= -2: logging.error(
+                    "抢单时间已过超过2秒，按钮仍未出现，任务终止。"); return True  # 同样视为任务结束
+                continue
+        return False  # 用户手动停止
 
     def handle_robbery_steps(self):
+        # ... (此方法保持不变)
         logging.info("✅ 已点击抢单链接！")
         self.wait.until(EC.element_to_be_clickable((By.XPATH, "//a[@class='layui-layer-btn0']"))).click()
         logging.info("已点击'信息'确认框。")
@@ -253,12 +292,12 @@ class OrderSnatcher:
 
 
 # ==================================================================
-# 3. GUI 界面逻辑
+# 3. GUI 界面逻辑 (保持不变)
 # ==================================================================
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title("潍钢抢单助手 V7.2 (生产版)")
+        self.root.title("潍钢抢单助手 V7.3 (灾备重启)")
         self.root.geometry("650x750")
         self.snatcher_thread = None
         self.stop_event = threading.Event()
@@ -289,7 +328,7 @@ class App:
         self.confirm_x = tk.StringVar()
         self.confirm_y = tk.StringVar()
         self.screenshot_delay = tk.StringVar()
-        self.refresh_advance_time = tk.StringVar()  # 新增
+        self.refresh_advance_time = tk.StringVar()
         self.mouse_pos = tk.StringVar(value="鼠标坐标: (-, -)")
         row = 0
         ttk.Label(params_frame, text="网站账号:").grid(row=row, column=0, sticky=tk.W, padx=5, pady=3)
@@ -316,10 +355,8 @@ class App:
         row += 1
         ttk.Label(params_frame, text="截图前延时(秒):").grid(row=row, column=0, sticky=tk.W, padx=5, pady=3)
         ttk.Entry(params_frame, textvariable=self.screenshot_delay).grid(row=row, column=1, sticky=tk.EW)
-        # --- 【新增】提前刷新时间输入框 ---
         ttk.Label(params_frame, text="提前刷新(秒):").grid(row=row, column=2, sticky=tk.W, padx=5, pady=3)
         ttk.Entry(params_frame, textvariable=self.refresh_advance_time).grid(row=row, column=3, sticky=tk.EW)
-
         coords_frame = ttk.LabelFrame(main_frame, text="坐标拾取工具", padding="10")
         coords_frame.pack(fill=tk.X, pady=10)
         pos_label = ttk.Label(coords_frame, textvariable=self.mouse_pos, font=("", 12, "bold"), foreground="blue")
@@ -440,11 +477,15 @@ class App:
         self.check_thread()
 
     def run_snatcher_thread(self, order_data, login_info, api_token, captcha_coords):
+        snatcher = None
         try:
             snatcher = OrderSnatcher(order_data, login_info, api_token, captcha_coords, self.stop_event)
             snatcher.run()
         except Exception as e:
             logging.error(f"抢单线程启动失败: {e}")
+        finally:
+            if snatcher:
+                snatcher._quit_driver()  # 确保即使run方法启动失败，driver也被清理
 
     def stop_snatching(self):
         logging.warning("正在发送停止信号...");
@@ -473,7 +514,7 @@ class App:
         self.confirm_x.set(config.get("confirm_x", "920"))
         self.confirm_y.set(config.get("confirm_y", "740"))
         self.screenshot_delay.set(config.get("screenshot_delay", "1.5"))
-        self.refresh_advance_time.set(config.get("refresh_advance_time", "15"))  # 新增
+        self.refresh_advance_time.set(config.get("refresh_advance_time", "15"))
         logging.info("已从本地加载配置（或使用默认值）。")
 
     def save_settings(self):
@@ -485,7 +526,7 @@ class App:
             "x2": self.x2.get(), "y2": self.y2.get(),
             "confirm_x": self.confirm_x.get(), "confirm_y": self.confirm_y.get(),
             "screenshot_delay": self.screenshot_delay.get(),
-            "refresh_advance_time": self.refresh_advance_time.get()  # 新增
+            "refresh_advance_time": self.refresh_advance_time.get()
         }
         self.config_manager.save_config(config)
 
@@ -518,7 +559,6 @@ class TextHandler(logging.Handler):
 # 5. 主程序启动入口
 # ==================================================================
 def check_trial_period():
-    """检查是否在试用期内"""
     try:
         start_time = datetime.strptime("2025-11-17 12:00:00", "%Y-%m-%d %H:%M:%S")
         end_time = datetime.strptime("2025-11-24 12:00:00", "%Y-%m-%d %H:%M:%S")
