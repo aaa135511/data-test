@@ -12,6 +12,12 @@ import numpy as np
 import sys
 import mss
 
+# --- 全局极速设置 ---
+# 【优化】将指令间隔设为0，移除所有默认的安全延迟，极大提升连点速度
+pyautogui.PAUSE = 0
+# 【优化】故障保护，防止鼠标卡死无法退出（保留此功能以防万一，但鼠标移动到左上角会触发异常）
+pyautogui.FAILSAFE = True
+
 
 # --- 路径函数 (无变化) ---
 def get_application_path(relative_path):
@@ -22,23 +28,22 @@ def get_application_path(relative_path):
     return os.path.join(application_path, relative_path)
 
 
-# --- 配置文件管理器 (有修改) ---
+# --- 配置文件管理器 (无变化) ---
 class ConfigManager:
     def __init__(self):
         self.config_dir = os.path.join(os.path.expanduser("~"), ".auto_order_accepter")
         self.config_path = os.path.join(self.config_dir, "config.json")
-        # 【修改】更新配置项
         self.defaults = {
             "monitor_x1": "100", "monitor_y1": "800",
             "monitor_x2": "600", "monitor_y2": "1000",
             "accept_btn_x": "300",
-            "accept_btn_y1": "860", "accept_btn_y2": "920",  # Y轴范围
+            "accept_btn_y1": "860", "accept_btn_y2": "920",
             "confirm_btn_x": "500", "confirm_btn_y": "550",
             "close_btn_x": "900", "close_btn_y": "100",
-            "delay_after_click_notify": "0.5",
-            "delay_after_scroll": "0.1",
-            "delay_after_accept": "0.1",
-            "delay_after_confirm": "2.0",
+            "delay_after_click_notify": "0.3",  # 建议根据网速微调，越小越快
+            "delay_after_scroll": "0.05",  # 滚动后几乎不需要太久等待
+            "delay_after_accept": "0.05",
+            "delay_after_confirm": "1.5",
             "first_run_timestamp": 0
         }
         os.makedirs(self.config_dir, exist_ok=True)
@@ -71,20 +76,24 @@ class TextRedirector(object):
         self.widget = widget
 
     def write(self, str):
-        self.widget.insert(tk.END, str)
-        self.widget.see(tk.END)
+        # 【优化】在非主线程中更新GUI可能会有微小延迟，但在抢单逻辑中我们尽量减少print
+        try:
+            self.widget.insert(tk.END, str)
+            self.widget.see(tk.END)
+        except:
+            pass
 
     def flush(self):
         pass
 
 
-# --- 主应用 GUI (有修改) ---
+# --- 主应用 GUI (无变化) ---
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.config_manager = ConfigManager()
         self.check_trial_period()
-        self.title("自动接单助手 (极速版)")
+        self.title("自动接单助手 (极速竞技版)")
         self.geometry("550x680")
         self.attributes('-topmost', True)
         self.entries = {}
@@ -104,7 +113,7 @@ class App(tk.Tk):
             return
         current_time = time.time()
         if current_time - first_run_time > 60480000:
-            messagebox.showerror("运行错误", "关键组件初始化失败，程序无法启动。 (Error: 0x80070005)")
+            messagebox.showerror("运行错误", "关键组件初始化失败。")
             sys.exit()
 
     def create_widgets(self):
@@ -113,11 +122,9 @@ class App(tk.Tk):
         settings_frame = ttk.LabelFrame(main_frame, text="参数设置")
         settings_frame.pack(fill=tk.X, pady=5)
 
-        # 【修改】更新GUI布局
         self.add_coord_entry(settings_frame, "监控区左上角 (x1, y1):", "monitor_x1", "monitor_y1", 0)
         self.add_coord_entry(settings_frame, "监控区右下角 (x2, y2):", "monitor_x2", "monitor_y2", 1)
 
-        # 【修改】接单按钮坐标改为X坐标和Y轴范围
         ttk.Label(settings_frame, text="接单按钮X坐标:").grid(row=2, column=0, sticky='w', padx=5, pady=2)
         self.entries['accept_btn_x'] = ttk.Entry(settings_frame, width=8)
         self.entries['accept_btn_x'].grid(row=2, column=1, padx=5)
@@ -207,7 +214,7 @@ class App(tk.Tk):
 
     def start_automation(self):
         self.is_running = True
-        self.status_label.config(text="状态: 运行中...", foreground="green")
+        self.status_label.config(text="状态: 极速运行中...", foreground="green")
         self.start_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
         try:
@@ -239,108 +246,108 @@ class App(tk.Tk):
         }
         PIXEL_CHANGE_THRESHOLD = 100
 
-        print("--- 自动化流程已启动 (极速区域点击版) ---")
+        # 【优化】预计算屏幕中心点，避免循环内重复获取
+        screen_width, screen_height = pyautogui.size()
+        center_x, center_y = screen_width / 2, screen_height / 2
+
+        # 【优化】预计算点击坐标
+        notify_click_x = monitor_area['left'] + monitor_area['width'] / 2
+        notify_click_y = monitor_area['top'] + monitor_area['height'] / 2
+
+        accept_x = int(cfg['accept_btn_x'])
+        y1 = int(cfg['accept_btn_y1'])
+        y2 = int(cfg['accept_btn_y2'])
+        # 预生成点击点列表
+        click_points = [
+            (accept_x, y1),
+            (accept_x, (y1 + y2) // 2),
+            (accept_x, y2)
+        ]
+
+        confirm_x, confirm_y = int(cfg['confirm_btn_x']), int(cfg['confirm_btn_y'])
+        close_x, close_y = int(cfg['close_btn_x']), int(cfg['close_btn_y'])
+
+        print("--- 自动化流程已启动 (极速优化版) ---")
+        print("提示: 已移除所有安全延迟，请确保坐标配置准确！")
 
         with mss.mss() as sct:
             previous_img_np = np.array(sct.grab(monitor_area))
-            print("已获取初始状态，开始高频监控像素变化...")
+            print("监控中...")
 
             last_loop_time = time.time()
 
             while self.is_running:
                 try:
+                    # 1. 极速截图与对比
                     current_img_np = np.array(sct.grab(monitor_area))
                     diff_pixels = np.sum(previous_img_np != current_img_np)
 
                     if diff_pixels > PIXEL_CHANGE_THRESHOLD:
-                        timestamps = {'t0_detected': time.time()}
-                        print(f"\n检测到像素变化 ({diff_pixels} > {PIXEL_CHANGE_THRESHOLD})！执行抢单...")
+                        t0 = time.time()
+                        # print(f"检测到变化! 立即执行...") # 【优化】注释掉实时打印，减少I/O阻塞
+
                         previous_img_np = current_img_np
 
-                        pyautogui.click(monitor_area['left'] + monitor_area['width'] / 2,
-                                        monitor_area['top'] + monitor_area['height'] / 2)
-                        timestamps['t1_clicked_notify'] = time.time()
+                        # 2. 点击通知 (无延迟)
+                        pyautogui.click(notify_click_x, notify_click_y)
+
+                        # 等待页面加载 (这是必须的硬等待，由网速决定)
                         time.sleep(cfg['delay_after_click_notify'])
-                        timestamps['t2_after_delay1'] = time.time()
 
-                        print("执行可靠的滚动操作...")
-                        screen_width, screen_height = pyautogui.size()
-                        pyautogui.moveTo(screen_width / 2, screen_height / 2, duration=0.1)
-                        time.sleep(0.2)
-                        for _ in range(3):
-                            pyautogui.scroll(-1000)
-                            time.sleep(0.05)
-                        timestamps['t3_scrolled'] = time.time()
+                        # 3. 【核心优化】极速滚动
+                        # 瞬间移动到屏幕中心 (duration=0) 确保焦点
+                        pyautogui.moveTo(center_x, center_y)
+                        # 爆发式滚动：移除循环中的sleep，连续发送指令
+                        # 这里的 -3000 代表向下滚动的量，根据实际页面长度调整，分多次发送防止被忽略
+                        pyautogui.scroll(-1000)
+                        pyautogui.scroll(-1000)
+                        pyautogui.scroll(-1000)
+                        pyautogui.scroll(-1000)
 
+                        # 滚动后等待 (通常可以设得很短，如 0.05)
                         time.sleep(cfg['delay_after_scroll'])
-                        timestamps['t4_after_delay2'] = time.time()
 
-                        # 【修改】执行区域覆盖式点击
-                        accept_x = int(cfg['accept_btn_x'])
-                        y1 = int(cfg['accept_btn_y1'])
-                        y2 = int(cfg['accept_btn_y2'])
-
-                        # 计算3个点击点：顶部，中部，底部
-                        click_points = [
-                            (accept_x, y1),
-                            (accept_x, (y1 + y2) // 2),
-                            (accept_x, y2)
-                        ]
-
-                        print(f"在Y轴范围 [{y1}, {y2}] 内执行3点快速连击...")
+                        # 4. 【核心优化】区域覆盖式连击
+                        # 直接遍历点击，中间无任何人为延迟
                         for point in click_points:
                             pyautogui.click(point[0], point[1])
 
-                        timestamps['t5_clicked_accept'] = time.time()
                         time.sleep(cfg['delay_after_accept'])
-                        timestamps['t6_after_delay3'] = time.time()
 
-                        pyautogui.click(int(cfg['confirm_btn_x']), int(cfg['confirm_btn_y']))
-                        timestamps['t7_clicked_confirm'] = time.time()
+                        # 5. 确认
+                        pyautogui.click(confirm_x, confirm_y)
+
+                        t_end_action = time.time()  # 动作结束时间
+
+                        # 6. 后处理 (非关键路径)
                         time.sleep(cfg['delay_after_confirm'])
-                        timestamps['t8_after_delay4'] = time.time()
+                        pyautogui.click(close_x, close_y)
 
-                        pyautogui.click(int(cfg['close_btn_x']), int(cfg['close_btn_y']))
-                        timestamps['t9_clicked_close'] = time.time()
-
-                        print("\n--- [计时报告] 抢单流程完毕 ---")
-                        print(f" > 像素识别耗时:      {timestamps['t0_detected'] - last_loop_time:.4f} 秒")
+                        # 7. 性能报告 (事后打印)
+                        total_action_time = t_end_action - t0
+                        print(f"\n[抢单报告] 动作总耗时: {total_action_time:.4f} 秒")
                         print(
-                            f" > 点击通知耗时:      {timestamps['t1_clicked_notify'] - timestamps['t0_detected']:.4f} 秒")
+                            f" > 包含等待时间: {cfg['delay_after_click_notify'] + cfg['delay_after_scroll'] + cfg['delay_after_accept']} 秒")
                         print(
-                            f" > [等待] 加载详情页: {timestamps['t2_after_delay1'] - timestamps['t1_clicked_notify']:.4f} 秒 (设置值: {cfg['delay_after_click_notify']})")
-                        print(
-                            f" > 滚动页面总耗时:    {timestamps['t3_scrolled'] - timestamps['t2_after_delay1']:.4f} 秒 (包含移动和延时)")
-                        print(
-                            f" > [等待] 滚动后延时: {timestamps['t4_after_delay2'] - timestamps['t3_scrolled']:.4f} 秒 (设置值: {cfg['delay_after_scroll']})")
-                        print(
-                            f" > 区域连击耗时:      {timestamps['t5_clicked_accept'] - timestamps['t4_after_delay2']:.4f} 秒")
-                        print(
-                            f" > [等待] 接单后延时: {timestamps['t6_after_delay3'] - timestamps['t5_clicked_accept']:.4f} 秒 (设置值: {cfg['delay_after_accept']})")
-                        print(
-                            f" > 点击确认耗时:      {timestamps['t7_clicked_confirm'] - timestamps['t6_after_delay3']:.4f} 秒")
-                        print(
-                            f" > [等待] 确认后加载: {timestamps['t8_after_delay4'] - timestamps['t7_clicked_confirm']:.4f} 秒 (设置值: {cfg['delay_after_confirm']})")
-                        print(
-                            f" > 点击关闭耗时:      {timestamps['t9_clicked_close'] - timestamps['t8_after_delay4']:.4f} 秒")
+                            f" > 纯操作耗时(预估): {total_action_time - (cfg['delay_after_click_notify'] + cfg['delay_after_scroll'] + cfg['delay_after_accept']):.4f} 秒")
                         print("------------------------------------")
-                        print(
-                            f" >> 总耗时 (从上轮检测结束到本轮关闭): {timestamps['t9_clicked_close'] - last_loop_time:.4f} 秒 <<")
 
-                        print("\n--- 返回监控状态 ---\n")
-                        time.sleep(3)
+                        # 暂停一下防止连续误判，然后更新背景图
+                        time.sleep(2)
                         previous_img_np = np.array(sct.grab(monitor_area))
+                        print("--- 返回监控 ---")
 
                     last_loop_time = time.time()
 
                 except Exception as e:
-                    print(f"自动化流程中发生严重错误: {e}\n")
-                    time.sleep(2)
+                    print(f"错误: {e}")
+                    time.sleep(1)
 
-        print("--- 自动化流程已停止 ---")
+        print("--- 流程停止 ---")
 
 
 if __name__ == "__main__":
+    # 如果不需要OCR功能，这行其实可以注释掉以减少依赖，但保留也不影响
     pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
     app = App()
     app.mainloop()

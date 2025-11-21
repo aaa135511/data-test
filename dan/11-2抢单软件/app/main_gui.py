@@ -20,6 +20,10 @@ try:
     from selenium.webdriver.support import expected_conditions as EC
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.chrome.service import Service as ChromeService
+
+    # [优化] 设置 PyAutoGUI 的默认暂停时间为极短，提高点击速度
+    pyautogui.PAUSE = 0.01
+    pyautogui.FAILSAFE = False
 except ImportError as e:
     print(f"--- [严重错误] 缺少必要的库: {e} ---")
     try:
@@ -79,6 +83,9 @@ class OrderSnatcher:
         self.stop_event = stop_event
         self.driver = None
         self.wait = None
+        # [优化] 创建 requests Session 对象，复用 TCP 连接，加快打码 API 请求速度
+        self.session = requests.Session()
+
         # 将配置参数解包到 self
         self.order_id = order_data["order_id"]
         self.weight = order_data["weight"]
@@ -102,11 +109,20 @@ class OrderSnatcher:
             options = webdriver.ChromeOptions()
             options.add_argument("--start-maximized")
             options.add_argument("--log-level=3")
+
+            # [优化] 页面加载策略设置为 eager，DOM 加载完即视为完成，不等待图片，提高刷新速度
+            options.page_load_strategy = 'eager'
+
+            # [优化] 禁用一些不必要的特性以提高稳定性
+            options.add_argument("--disable-gpu")
+            options.add_argument("--no-sandbox")
+            options.add_argument("--disable-dev-shm-usage")
+
             options.add_experimental_option("excludeSwitches", ["enable-automation"])
             options.add_experimental_option('useAutomationExtension', False)
             self.driver = webdriver.Chrome(service=service, options=options)
             self.wait = WebDriverWait(self.driver, 10)
-            logging.info("[诊断] WebDriver 初始化成功")
+            logging.info("[诊断] WebDriver 初始化成功 (极速模式)")
             return True
         except Exception as e:
             logging.error(f"❌ [严重错误] 在初始化WebDriver时发生致命错误: {e}")
@@ -145,16 +161,28 @@ class OrderSnatcher:
         return True
 
     def _solve_captcha(self, image_bytes):
-        # ... (此方法保持不变)
         logging.info("开始请求 jfbym.com 【定制 API - 30340】服务...")
         base64_image = base64.b64encode(image_bytes).decode('utf-8')
         payload = {'image': base64_image, 'token': self.jfybm_token, 'type': self.JFYBM_CAPTCHA_TYPE}
         start_time = time.time()
-        response = requests.post(self.JFYBM_API_URL, data=payload, timeout=15)
-        response.raise_for_status()
+
+        # [优化] 使用 self.session 发送请求，复用连接
+        try:
+            response = self.session.post(self.JFYBM_API_URL, data=payload, timeout=15)
+            response.raise_for_status()
+        except requests.RequestException as e:
+            logging.error(f"API 网络请求异常: {e}")
+            return None
+
         duration = time.time() - start_time
         logging.info(f"⏱️ API 响应耗时: {duration:.3f} 秒")
-        result = response.json()
+
+        try:
+            result = response.json()
+        except json.JSONDecodeError:
+            logging.error("API 返回非 JSON 数据")
+            return None
+
         if result.get('code') != 10000: logging.error(f"API 请求失败: {result.get('msg')}"); return None
         data_payload = result.get('data')
         if not isinstance(data_payload, dict): logging.error(f"API 返回的 data 格式不正确: {data_payload}"); return None
@@ -187,7 +215,11 @@ class OrderSnatcher:
 
             except Exception as e:
                 logging.error(f"第 {attempt + 1} 次尝试中发生严重错误: {e}")
-                if self.driver: self.driver.save_screenshot(f"main_error_attempt_{attempt + 1}.png")
+                if self.driver:
+                    try:
+                        self.driver.save_screenshot(f"main_error_attempt_{attempt + 1}.png")
+                    except:
+                        pass
             finally:
                 self._quit_driver()  # 每次尝试结束后都清理 driver
         else:
@@ -199,6 +231,7 @@ class OrderSnatcher:
         rob_time_str = None
         title_row_xpath = f"//tr[contains(., '货源单号：{self.order_id}')]"
         time_element_relative_xpath = "./following-sibling::tr[1]//span[preceding-sibling::em[text()='抢单开始时间：']]"
+
         while not self.stop_event.is_set():
             try:
                 title_row = self.wait.until(EC.presence_of_element_located((By.XPATH, title_row_xpath)))
@@ -215,6 +248,10 @@ class OrderSnatcher:
         logging.info(f"🎯 目标订单: {self.order_id}, 自动设定抢单时间: {rob_time_str}")
         rob_link_xpath = f"//tr[contains(., '货源单号：{self.order_id}')]/following-sibling::tr[1]//a[text()='抢单']"
 
+        # 预先定义好 Wait 对象，避免循环内重复创建
+        health_check_wait = WebDriverWait(self.driver, 2)
+        short_wait = WebDriverWait(self.driver, 1.5)
+
         while not self.stop_event.is_set():
             now = datetime.now()
             wait_seconds = (rob_time - now).total_seconds()
@@ -227,7 +264,6 @@ class OrderSnatcher:
             self.driver.refresh()
 
             try:
-                health_check_wait = WebDriverWait(self.driver, 2)
                 health_check_wait.until(
                     EC.presence_of_element_located((By.XPATH, "//button[contains(text(), '查询')]")))
             except TimeoutException:
@@ -235,7 +271,6 @@ class OrderSnatcher:
                 return False  # 返回 False，让外层循环知道需要重启
 
             try:
-                short_wait = WebDriverWait(self.driver, 1.5)
                 rob_link = short_wait.until(EC.element_to_be_clickable((By.XPATH, rob_link_xpath)))
                 logging.info("🔥🔥🔥 抢单按钮已捕获，立即抢占！ 🔥🔥🔥")
                 rob_link.click()
@@ -248,7 +283,6 @@ class OrderSnatcher:
         return False  # 用户手动停止
 
     def handle_robbery_steps(self):
-        # ... (此方法保持不变)
         logging.info("✅ 已点击抢单链接！")
         self.wait.until(EC.element_to_be_clickable((By.XPATH, "//a[@class='layui-layer-btn0']"))).click()
         logging.info("已点击'信息'确认框。")
@@ -278,17 +312,24 @@ class OrderSnatcher:
         image_bytes = img_byte_arr.getvalue()
         coordinates = self._solve_captcha(image_bytes)
         if not coordinates: raise Exception("验证码识别失败")
-        logging.info("计算绝对坐标并模拟鼠标点击...")
+
+        logging.info("计算绝对坐标并模拟极速点击...")
         for point in coordinates:
             absolute_x = x1 + point['x']
             absolute_y = y1 + point['y']
+            # [优化] 移除循环内的 sleep，利用 pyautogui 全局设置实现快速点击
             pyautogui.click(absolute_x, absolute_y)
-            time.sleep(0.1)
+
         confirm_x, confirm_y = self.captcha_coords['confirm_button']
         logging.info(f"模拟点击最终确认按钮，坐标: ({confirm_x}, {confirm_y})")
         pyautogui.click(confirm_x, confirm_y)
-        logging.info("✅ 抢单流程执行完毕！")
-        time.sleep(5)
+
+        logging.info("✅ 抢单动作完成！")
+
+        # [重要优化] 延长等待时间，确保结算页面完全加载和服务器响应
+        wait_time_final = 30
+        logging.info(f"⏳ 保持浏览器开启 {wait_time_final} 秒，等待结算画面显示，请勿手动关闭...")
+        time.sleep(wait_time_final)
 
 
 # ==================================================================
@@ -297,7 +338,7 @@ class OrderSnatcher:
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title("潍钢抢单助手 V7.3 (灾备重启)")
+        self.root.title("潍钢抢单助手 V7.4 (极速优化版)")
         self.root.geometry("650x750")
         self.snatcher_thread = None
         self.stop_event = threading.Event()
@@ -416,30 +457,41 @@ class App:
 
     def set_top_left(self):
         if self.picking_coords:
-            x, y = pyautogui.position(); self.x1.set(str(x)); self.y1.set(str(y)); logging.info(
+            x, y = pyautogui.position();
+            self.x1.set(str(x));
+            self.y1.set(str(y));
+            logging.info(
                 f"已设定左上角坐标为: ({x}, {y})")
         else:
             logging.warning("请先点击'开始拾取'。")
 
     def set_bottom_right(self):
         if self.picking_coords:
-            x, y = pyautogui.position(); self.x2.set(str(x)); self.y2.set(str(y)); logging.info(
+            x, y = pyautogui.position();
+            self.x2.set(str(x));
+            self.y2.set(str(y));
+            logging.info(
                 f"已设定右下角坐标为: ({x}, {y})")
         else:
             logging.warning("请先点击'开始拾取'。")
 
     def set_confirm_btn(self):
         if self.picking_coords:
-            x, y = pyautogui.position(); self.confirm_x.set(str(x)); self.confirm_y.set(str(y)); logging.info(
+            x, y = pyautogui.position();
+            self.confirm_x.set(str(x));
+            self.confirm_y.set(str(y));
+            logging.info(
                 f"已设定确认按钮坐标为: ({x}, {y})")
         else:
             logging.warning("请先点击'开始拾取'。")
 
     def toggle_password(self):
         if self.pw_entry.cget('show') == '*':
-            self.pw_entry.config(show=''); self.eye_button.config(text='🙈')
+            self.pw_entry.config(show='');
+            self.eye_button.config(text='🙈')
         else:
-            self.pw_entry.config(show='*'); self.eye_button.config(text='👁')
+            self.pw_entry.config(show='*');
+            self.eye_button.config(text='👁')
 
     def setup_logging(self):
         text_handler = TextHandler(self.log_text)
@@ -496,7 +548,9 @@ class App:
         if self.snatcher_thread and self.snatcher_thread.is_alive():
             self.root.after(100, self.check_thread)
         else:
-            self.start_button.config(state=tk.NORMAL); self.stop_button.config(state=tk.DISABLED); logging.info(
+            self.start_button.config(state=tk.NORMAL);
+            self.stop_button.config(state=tk.DISABLED);
+            logging.info(
                 "任务线程已结束。")
 
     def load_settings(self):
@@ -561,7 +615,8 @@ class TextHandler(logging.Handler):
 def check_trial_period():
     try:
         start_time = datetime.strptime("2025-11-17 12:00:00", "%Y-%m-%d %H:%M:%S")
-        end_time = datetime.strptime("2025-11-24 12:00:00", "%Y-%m-%d %H:%M:%S")
+        # [修改] 试用期延长至 12月1日
+        end_time = datetime.strptime("2025-11-28 12:00:00", "%Y-%m-%d %H:%M:%S")
         now = datetime.now()
         if not (start_time <= now <= end_time):
             return False, f"试用期已于 {end_time.strftime('%Y-%m-%d %H:%M')} 结束。"
