@@ -13,9 +13,8 @@ import sys
 import mss
 
 # --- 全局极速设置 ---
-# 【优化】将指令间隔设为0，移除所有默认的安全延迟，极大提升连点速度
+# 保持极速设置，但我们在关键部位手动控制微秒级延迟
 pyautogui.PAUSE = 0
-# 【优化】故障保护，防止鼠标卡死无法退出（保留此功能以防万一，但鼠标移动到左上角会触发异常）
 pyautogui.FAILSAFE = True
 
 
@@ -40,8 +39,8 @@ class ConfigManager:
             "accept_btn_y1": "860", "accept_btn_y2": "920",
             "confirm_btn_x": "500", "confirm_btn_y": "550",
             "close_btn_x": "900", "close_btn_y": "100",
-            "delay_after_click_notify": "0.3",  # 建议根据网速微调，越小越快
-            "delay_after_scroll": "0.05",  # 滚动后几乎不需要太久等待
+            "delay_after_click_notify": "0.3",
+            "delay_after_scroll": "0.05",
             "delay_after_accept": "0.05",
             "delay_after_confirm": "1.5",
             "first_run_timestamp": 0
@@ -76,7 +75,6 @@ class TextRedirector(object):
         self.widget = widget
 
     def write(self, str):
-        # 【优化】在非主线程中更新GUI可能会有微小延迟，但在抢单逻辑中我们尽量减少print
         try:
             self.widget.insert(tk.END, str)
             self.widget.see(tk.END)
@@ -93,7 +91,7 @@ class App(tk.Tk):
         super().__init__()
         self.config_manager = ConfigManager()
         self.check_trial_period()
-        self.title("自动接单助手 (极速竞技版)")
+        self.title("自动接单助手 (极速修正版)")
         self.geometry("550x680")
         self.attributes('-topmost', True)
         self.entries = {}
@@ -246,18 +244,15 @@ class App(tk.Tk):
         }
         PIXEL_CHANGE_THRESHOLD = 100
 
-        # 【优化】预计算屏幕中心点，避免循环内重复获取
         screen_width, screen_height = pyautogui.size()
         center_x, center_y = screen_width / 2, screen_height / 2
 
-        # 【优化】预计算点击坐标
         notify_click_x = monitor_area['left'] + monitor_area['width'] / 2
         notify_click_y = monitor_area['top'] + monitor_area['height'] / 2
 
         accept_x = int(cfg['accept_btn_x'])
         y1 = int(cfg['accept_btn_y1'])
         y2 = int(cfg['accept_btn_y2'])
-        # 预生成点击点列表
         click_points = [
             (accept_x, y1),
             (accept_x, (y1 + y2) // 2),
@@ -267,8 +262,7 @@ class App(tk.Tk):
         confirm_x, confirm_y = int(cfg['confirm_btn_x']), int(cfg['confirm_btn_y'])
         close_x, close_y = int(cfg['close_btn_x']), int(cfg['close_btn_y'])
 
-        print("--- 自动化流程已启动 (极速优化版) ---")
-        print("提示: 已移除所有安全延迟，请确保坐标配置准确！")
+        print("--- 自动化流程已启动 (滚动修复版) ---")
 
         with mss.mss() as sct:
             previous_img_np = np.array(sct.grab(monitor_area))
@@ -278,61 +272,56 @@ class App(tk.Tk):
 
             while self.is_running:
                 try:
-                    # 1. 极速截图与对比
                     current_img_np = np.array(sct.grab(monitor_area))
                     diff_pixels = np.sum(previous_img_np != current_img_np)
 
                     if diff_pixels > PIXEL_CHANGE_THRESHOLD:
                         t0 = time.time()
-                        # print(f"检测到变化! 立即执行...") # 【优化】注释掉实时打印，减少I/O阻塞
-
                         previous_img_np = current_img_np
 
-                        # 2. 点击通知 (无延迟)
+                        # 1. 点击通知
                         pyautogui.click(notify_click_x, notify_click_y)
 
-                        # 等待页面加载 (这是必须的硬等待，由网速决定)
+                        # 等待页面加载 (根据网速调整)
                         time.sleep(cfg['delay_after_click_notify'])
 
-                        # 3. 【核心优化】极速滚动
-                        # 瞬间移动到屏幕中心 (duration=0) 确保焦点
+                        # 2. 【修复】滚动逻辑
+                        # 瞬间移动到屏幕中心
                         pyautogui.moveTo(center_x, center_y)
-                        # 爆发式滚动：移除循环中的sleep，连续发送指令
-                        # 这里的 -3000 代表向下滚动的量，根据实际页面长度调整，分多次发送防止被忽略
-                        pyautogui.scroll(-1000)
-                        pyautogui.scroll(-1000)
-                        pyautogui.scroll(-1000)
-                        pyautogui.scroll(-1000)
 
-                        # 滚动后等待 (通常可以设得很短，如 0.05)
+                        # 【关键修复】: 必须给浏览器一点时间识别鼠标已经到了页面中间
+                        # 0.08秒是经验值，既比原来的0.2秒快，又能保证系统识别到焦点
+                        time.sleep(0.08)
+
+                        # 【优化】爆发式滚动
+                        # 分两次大滚动，中间加极微小的间隔，防止系统吞掉指令
+                        # -2000 的值比之前的 -1000 更大，滚得更远
+                        pyautogui.scroll(-2000)
+                        time.sleep(0.01)  # 10毫秒间隔，几乎不耗时但能保证稳定性
+                        pyautogui.scroll(-2000)
+
+                        # 滚动后等待
                         time.sleep(cfg['delay_after_scroll'])
 
-                        # 4. 【核心优化】区域覆盖式连击
-                        # 直接遍历点击，中间无任何人为延迟
+                        # 3. 区域连击
                         for point in click_points:
                             pyautogui.click(point[0], point[1])
 
                         time.sleep(cfg['delay_after_accept'])
 
-                        # 5. 确认
+                        # 4. 确认
                         pyautogui.click(confirm_x, confirm_y)
 
-                        t_end_action = time.time()  # 动作结束时间
+                        t_end_action = time.time()
 
-                        # 6. 后处理 (非关键路径)
+                        # 5. 后处理
                         time.sleep(cfg['delay_after_confirm'])
                         pyautogui.click(close_x, close_y)
 
-                        # 7. 性能报告 (事后打印)
                         total_action_time = t_end_action - t0
                         print(f"\n[抢单报告] 动作总耗时: {total_action_time:.4f} 秒")
-                        print(
-                            f" > 包含等待时间: {cfg['delay_after_click_notify'] + cfg['delay_after_scroll'] + cfg['delay_after_accept']} 秒")
-                        print(
-                            f" > 纯操作耗时(预估): {total_action_time - (cfg['delay_after_click_notify'] + cfg['delay_after_scroll'] + cfg['delay_after_accept']):.4f} 秒")
                         print("------------------------------------")
 
-                        # 暂停一下防止连续误判，然后更新背景图
                         time.sleep(2)
                         previous_img_np = np.array(sct.grab(monitor_area))
                         print("--- 返回监控 ---")
@@ -347,7 +336,6 @@ class App(tk.Tk):
 
 
 if __name__ == "__main__":
-    # 如果不需要OCR功能，这行其实可以注释掉以减少依赖，但保留也不影响
     pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
     app = App()
     app.mainloop()

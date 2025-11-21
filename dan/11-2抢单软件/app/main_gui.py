@@ -110,19 +110,19 @@ class OrderSnatcher:
             options.add_argument("--start-maximized")
             options.add_argument("--log-level=3")
 
-            # [优化] 页面加载策略设置为 eager，DOM 加载完即视为完成，不等待图片，提高刷新速度
-            options.page_load_strategy = 'eager'
-
-            # [优化] 禁用一些不必要的特性以提高稳定性
-            options.add_argument("--disable-gpu")
-            options.add_argument("--no-sandbox")
-            options.add_argument("--disable-dev-shm-usage")
+            # [修复] 暂时注释掉 eager 模式，因为它导致了登录页面的超时崩溃
+            # 如果您的网络非常快且稳定，可以尝试取消注释，否则建议保持注释以确保稳定
+            # options.page_load_strategy = 'eager'
 
             options.add_experimental_option("excludeSwitches", ["enable-automation"])
             options.add_experimental_option('useAutomationExtension', False)
+
             self.driver = webdriver.Chrome(service=service, options=options)
-            self.wait = WebDriverWait(self.driver, 10)
-            logging.info("[诊断] WebDriver 初始化成功 (极速模式)")
+
+            # [修复] 将超时时间从 10秒 增加到 30秒，防止网页加载慢导致程序报错退出
+            self.wait = WebDriverWait(self.driver, 30)
+
+            logging.info("[诊断] WebDriver 初始化成功 (稳定模式)")
             return True
         except Exception as e:
             logging.error(f"❌ [严重错误] 在初始化WebDriver时发生致命错误: {e}")
@@ -142,23 +142,39 @@ class OrderSnatcher:
 
     def login(self):
         logging.info("正在打开登录页面...")
-        self.driver.get(f"{self.BASE_URL}/system/login")
-        self.wait.until(
-            EC.presence_of_element_located((By.XPATH, '//input[@placeholder="请输入您的用户名或手机号码"]'))).send_keys(
-            self.username)
-        self.driver.find_element(By.XPATH, '//input[@placeholder="输入您的密码"]').send_keys(self.password)
-        self.driver.find_element(By.XPATH, '//button[contains(text(),"登")]').click()
-        self.wait.until(EC.presence_of_element_located((By.PARTIAL_LINK_TEXT, "新货源单管理")))
-        logging.info("✅ 登录成功！")
-        return True
+        try:
+            self.driver.get(f"{self.BASE_URL}/system/login")
+            # 增加显式等待，确保输入框真的出现了
+            username_input = self.wait.until(
+                EC.presence_of_element_located((By.XPATH, '//input[@placeholder="请输入您的用户名或手机号码"]'))
+            )
+            username_input.send_keys(self.username)
+
+            self.driver.find_element(By.XPATH, '//input[@placeholder="输入您的密码"]').send_keys(self.password)
+            self.driver.find_element(By.XPATH, '//button[contains(text(),"登")]').click()
+
+            # 等待登录完成
+            self.wait.until(EC.presence_of_element_located((By.PARTIAL_LINK_TEXT, "新货源单管理")))
+            logging.info("✅ 登录成功！")
+            return True
+        except TimeoutException:
+            logging.error("❌ 登录超时！页面加载过慢或元素未找到。")
+            return False
+        except Exception as e:
+            logging.error(f"❌ 登录失败: {e}")
+            return False
 
     def navigate_to_order_page(self):
         target_url = f"{self.BASE_URL}/newgoods/listSocietyPage"
         logging.info(f"正在通过URL直接导航到: {target_url}")
-        self.driver.get(target_url)
-        self.wait.until(EC.presence_of_element_located((By.XPATH, "//button[contains(text(), '查询')]")))
-        logging.info("✅ 已成功进入'新货源单(社会提单)'页面。")
-        return True
+        try:
+            self.driver.get(target_url)
+            self.wait.until(EC.presence_of_element_located((By.XPATH, "//button[contains(text(), '查询')]")))
+            logging.info("✅ 已成功进入'新货源单(社会提单)'页面。")
+            return True
+        except TimeoutException:
+            logging.error("❌ 导航超时！无法进入订单页面。")
+            return False
 
     def _solve_captcha(self, image_bytes):
         logging.info("开始请求 jfbym.com 【定制 API - 30340】服务...")
@@ -327,7 +343,7 @@ class OrderSnatcher:
         logging.info("✅ 抢单动作完成！")
 
         # [重要优化] 延长等待时间，确保结算页面完全加载和服务器响应
-        wait_time_final = 30
+        wait_time_final = 20
         logging.info(f"⏳ 保持浏览器开启 {wait_time_final} 秒，等待结算画面显示，请勿手动关闭...")
         time.sleep(wait_time_final)
 
@@ -338,7 +354,7 @@ class OrderSnatcher:
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title("潍钢抢单助手 V7.4 (极速优化版)")
+        self.root.title("潍钢抢单助手 V7.5 (稳定修复版)")
         self.root.geometry("650x750")
         self.snatcher_thread = None
         self.stop_event = threading.Event()
@@ -616,7 +632,7 @@ def check_trial_period():
     try:
         start_time = datetime.strptime("2025-11-17 12:00:00", "%Y-%m-%d %H:%M:%S")
         # [修改] 试用期延长至 12月1日
-        end_time = datetime.strptime("2025-11-28 12:00:00", "%Y-%m-%d %H:%M:%S")
+        end_time = datetime.strptime("2025-12-01 12:00:00", "%Y-%m-%d %H:%M:%S")
         now = datetime.now()
         if not (start_time <= now <= end_time):
             return False, f"试用期已于 {end_time.strftime('%Y-%m-%d %H:%M')} 结束。"
