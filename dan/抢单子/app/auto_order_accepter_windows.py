@@ -1,24 +1,23 @@
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
 import pyautogui
-import pytesseract
-from PIL import Image
+# import pytesseract  <-- 已删除
+# from PIL import Image <-- 其实PIL也不需要了，mss直接出数据，但保留以防万一
 import threading
 import time
 import json
 import os
-import cv2
+# import cv2 <-- 如果不涉及复杂图像识别，cv2也可以删，但保留着不影响性能
 import numpy as np
 import sys
 import mss
 
 # --- 全局极速设置 ---
-# 保持极速设置，但我们在关键部位手动控制微秒级延迟
 pyautogui.PAUSE = 0
 pyautogui.FAILSAFE = True
 
 
-# --- 路径函数 (无变化) ---
+# --- 路径函数 ---
 def get_application_path(relative_path):
     if getattr(sys, 'frozen', False):
         application_path = os.path.dirname(sys.executable)
@@ -27,7 +26,7 @@ def get_application_path(relative_path):
     return os.path.join(application_path, relative_path)
 
 
-# --- 配置文件管理器 (无变化) ---
+# --- 配置文件管理器 ---
 class ConfigManager:
     def __init__(self):
         self.config_dir = os.path.join(os.path.expanduser("~"), ".auto_order_accepter")
@@ -69,7 +68,7 @@ class ConfigManager:
             return False
 
 
-# --- 日志重定向类 (无变化) ---
+# --- 日志重定向类 ---
 class TextRedirector(object):
     def __init__(self, widget):
         self.widget = widget
@@ -85,13 +84,13 @@ class TextRedirector(object):
         pass
 
 
-# --- 主应用 GUI (无变化) ---
+# --- 主应用 GUI ---
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.config_manager = ConfigManager()
         self.check_trial_period()
-        self.title("自动接单助手 (极速修正版)")
+        self.title("自动接单助手 (极速纯净版)")
         self.geometry("550x680")
         self.attributes('-topmost', True)
         self.entries = {}
@@ -262,7 +261,7 @@ class App(tk.Tk):
         confirm_x, confirm_y = int(cfg['confirm_btn_x']), int(cfg['confirm_btn_y'])
         close_x, close_y = int(cfg['close_btn_x']), int(cfg['close_btn_y'])
 
-        print("--- 自动化流程已启动 (滚动修复版) ---")
+        print("--- 自动化流程已启动 (无OCR极速版) ---")
 
         with mss.mss() as sct:
             previous_img_np = np.array(sct.grab(monitor_area))
@@ -282,25 +281,18 @@ class App(tk.Tk):
                         # 1. 点击通知
                         pyautogui.click(notify_click_x, notify_click_y)
 
-                        # 等待页面加载 (根据网速调整)
+                        # 等待页面加载
                         time.sleep(cfg['delay_after_click_notify'])
 
-                        # 2. 【修复】滚动逻辑
-                        # 瞬间移动到屏幕中心
+                        # 2. 滚动 (包含焦点修复)
                         pyautogui.moveTo(center_x, center_y)
+                        time.sleep(0.08)  # 关键：给浏览器获取焦点的时间
 
-                        # 【关键修复】: 必须给浏览器一点时间识别鼠标已经到了页面中间
-                        # 0.08秒是经验值，既比原来的0.2秒快，又能保证系统识别到焦点
-                        time.sleep(0.08)
-
-                        # 【优化】爆发式滚动
-                        # 分两次大滚动，中间加极微小的间隔，防止系统吞掉指令
-                        # -2000 的值比之前的 -1000 更大，滚得更远
+                        # 爆发式滚动
                         pyautogui.scroll(-2000)
-                        time.sleep(0.01)  # 10毫秒间隔，几乎不耗时但能保证稳定性
+                        time.sleep(0.01)
                         pyautogui.scroll(-2000)
 
-                        # 滚动后等待
                         time.sleep(cfg['delay_after_scroll'])
 
                         # 3. 区域连击
@@ -336,6 +328,6 @@ class App(tk.Tk):
 
 
 if __name__ == "__main__":
-    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+    # 已移除 pytesseract 配置行
     app = App()
     app.mainloop()
