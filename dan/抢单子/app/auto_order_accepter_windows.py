@@ -1,13 +1,10 @@
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
 import pyautogui
-# import pytesseract  <-- 已删除
-# from PIL import Image <-- 其实PIL也不需要了，mss直接出数据，但保留以防万一
 import threading
 import time
 import json
 import os
-# import cv2 <-- 如果不涉及复杂图像识别，cv2也可以删，但保留着不影响性能
 import numpy as np
 import sys
 import mss
@@ -26,7 +23,7 @@ def get_application_path(relative_path):
     return os.path.join(application_path, relative_path)
 
 
-# --- 配置文件管理器 ---
+# --- 配置文件管理器 (新增颜色配置) ---
 class ConfigManager:
     def __init__(self):
         self.config_dir = os.path.join(os.path.expanduser("~"), ".auto_order_accepter")
@@ -35,7 +32,12 @@ class ConfigManager:
             "monitor_x1": "100", "monitor_y1": "800",
             "monitor_x2": "600", "monitor_y2": "1000",
             "accept_btn_x": "300",
-            "accept_btn_y1": "860", "accept_btn_y2": "920",
+            # 搜索范围要大，覆盖有图和无图两种情况
+            "search_y1": "700", "search_y2": "1000",
+            # 【新增】接单按钮的RGB颜色
+            "target_r": "255", "target_g": "100", "target_b": "50",
+            "color_tolerance": "20",  # 颜色容差，防止渲染差异
+
             "confirm_btn_x": "500", "confirm_btn_y": "550",
             "close_btn_x": "900", "close_btn_y": "100",
             "delay_after_click_notify": "0.3",
@@ -90,8 +92,8 @@ class App(tk.Tk):
         super().__init__()
         self.config_manager = ConfigManager()
         self.check_trial_period()
-        self.title("自动接单助手 (极速纯净版)")
-        self.geometry("550x680")
+        self.title("自动接单助手 (智能色块定位版)")
+        self.geometry("550x750")  # 加高一点
         self.attributes('-topmost', True)
         self.entries = {}
         self.automation_thread = None
@@ -122,30 +124,57 @@ class App(tk.Tk):
         self.add_coord_entry(settings_frame, "监控区左上角 (x1, y1):", "monitor_x1", "monitor_y1", 0)
         self.add_coord_entry(settings_frame, "监控区右下角 (x2, y2):", "monitor_x2", "monitor_y2", 1)
 
+        # 【修改】接单按钮设置
         ttk.Label(settings_frame, text="接单按钮X坐标:").grid(row=2, column=0, sticky='w', padx=5, pady=2)
         self.entries['accept_btn_x'] = ttk.Entry(settings_frame, width=8)
         self.entries['accept_btn_x'].grid(row=2, column=1, padx=5)
 
-        ttk.Label(settings_frame, text="接单按钮Y轴范围 (y1, y2):").grid(row=3, column=0, sticky='w', padx=5, pady=2)
-        self.entries['accept_btn_y1'] = ttk.Entry(settings_frame, width=8)
-        self.entries['accept_btn_y1'].grid(row=3, column=1, padx=5)
-        self.entries['accept_btn_y2'] = ttk.Entry(settings_frame, width=8)
-        self.entries['accept_btn_y2'].grid(row=3, column=2, padx=5)
+        ttk.Label(settings_frame, text="搜索Y轴范围 (y1, y2):").grid(row=3, column=0, sticky='w', padx=5, pady=2)
+        self.entries['search_y1'] = ttk.Entry(settings_frame, width=8)
+        self.entries['search_y1'].grid(row=3, column=1, padx=5)
+        self.entries['search_y2'] = ttk.Entry(settings_frame, width=8)
+        self.entries['search_y2'].grid(row=3, column=2, padx=5)
 
-        self.add_coord_entry(settings_frame, "确认按钮坐标 (x, y):", "confirm_btn_x", "confirm_btn_y", 4)
-        self.add_coord_entry(settings_frame, "关闭按钮坐标 (x, y):", "close_btn_x", "close_btn_y", 5)
-        ttk.Separator(settings_frame, orient='horizontal').grid(row=6, columnspan=4, sticky='ew', pady=5)
-        self.add_delay_entry(settings_frame, "点击通知后延时(秒):", "delay_after_click_notify", 7)
-        self.add_delay_entry(settings_frame, "滚动页面后延时(秒):", "delay_after_scroll", 8)
-        self.add_delay_entry(settings_frame, "点击接单后延时(秒):", "delay_after_accept", 9)
-        self.add_delay_entry(settings_frame, "点击确认后延时(秒):", "delay_after_confirm", 10)
+        # 【新增】颜色设置
+        color_frame = ttk.LabelFrame(main_frame, text="接单按钮颜色特征 (RGB)")
+        color_frame.pack(fill=tk.X, pady=5)
 
+        ttk.Label(color_frame, text="R(红):").pack(side=tk.LEFT, padx=5)
+        self.entries['target_r'] = ttk.Entry(color_frame, width=5)
+        self.entries['target_r'].pack(side=tk.LEFT)
+
+        ttk.Label(color_frame, text="G(绿):").pack(side=tk.LEFT, padx=5)
+        self.entries['target_g'] = ttk.Entry(color_frame, width=5)
+        self.entries['target_g'].pack(side=tk.LEFT)
+
+        ttk.Label(color_frame, text="B(蓝):").pack(side=tk.LEFT, padx=5)
+        self.entries['target_b'] = ttk.Entry(color_frame, width=5)
+        self.entries['target_b'].pack(side=tk.LEFT)
+
+        ttk.Label(color_frame, text="容差:").pack(side=tk.LEFT, padx=5)
+        self.entries['color_tolerance'] = ttk.Entry(color_frame, width=5)
+        self.entries['color_tolerance'].pack(side=tk.LEFT)
+
+        # 其他设置
+        other_frame = ttk.LabelFrame(main_frame, text="其他坐标与延时")
+        other_frame.pack(fill=tk.X, pady=5)
+
+        self.add_coord_entry(other_frame, "确认按钮 (x, y):", "confirm_btn_x", "confirm_btn_y", 0)
+        self.add_coord_entry(other_frame, "关闭按钮 (x, y):", "close_btn_x", "close_btn_y", 1)
+
+        self.add_delay_entry(other_frame, "点击通知后延时:", "delay_after_click_notify", 2)
+        self.add_delay_entry(other_frame, "滚动页面后延时:", "delay_after_scroll", 3)
+        self.add_delay_entry(other_frame, "点击接单后延时:", "delay_after_accept", 4)
+        self.add_delay_entry(other_frame, "点击确认后延时:", "delay_after_confirm", 5)
+
+        # 工具栏
         coords_frame = ttk.LabelFrame(main_frame, text="工具")
         coords_frame.pack(fill=tk.X, pady=10)
-        self.coord_label = ttk.Label(coords_frame, text="鼠标坐标: (x, y)", font=("Helvetica", 12))
+        self.coord_label = ttk.Label(coords_frame, text="鼠标: (x, y) RGB: -", font=("Helvetica", 10))
         self.coord_label.pack(side=tk.LEFT, padx=10)
-        self.toggle_coords_btn = ttk.Button(coords_frame, text="开启坐标显示", command=self.toggle_mouse_display)
+        self.toggle_coords_btn = ttk.Button(coords_frame, text="开启取色/坐标", command=self.toggle_mouse_display)
         self.toggle_coords_btn.pack(side=tk.RIGHT, padx=10)
+
         control_frame = ttk.Frame(main_frame)
         control_frame.pack(fill=tk.X, pady=10)
         self.save_btn = ttk.Button(control_frame, text="保存配置", command=self.save_settings)
@@ -154,11 +183,13 @@ class App(tk.Tk):
         self.start_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
         self.stop_btn = ttk.Button(control_frame, text="停止运行", state=tk.DISABLED, command=self.stop_automation)
         self.stop_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
+
         self.status_label = ttk.Label(main_frame, text="状态: 已停止", foreground="red")
         self.status_label.pack(pady=2)
+
         log_frame = ttk.LabelFrame(main_frame, text="运行日志")
         log_frame.pack(fill=tk.BOTH, expand=True, pady=5)
-        self.log_text = scrolledtext.ScrolledText(log_frame, height=10, wrap=tk.WORD)
+        self.log_text = scrolledtext.ScrolledText(log_frame, height=8, wrap=tk.WORD)
         self.log_text.pack(fill=tk.BOTH, expand=True)
         sys.stdout = TextRedirector(self.log_text)
         sys.stderr = TextRedirector(self.log_text)
@@ -193,31 +224,34 @@ class App(tk.Tk):
     def toggle_mouse_display(self):
         self.show_coords = not self.show_coords
         if self.show_coords:
-            self.toggle_coords_btn.config(text="关闭坐标显示")
+            self.toggle_coords_btn.config(text="关闭取色")
             self.coord_thread = threading.Thread(target=self._update_mouse_coords_loop, daemon=True)
             self.coord_thread.start()
         else:
-            self.toggle_coords_btn.config(text="开启坐标显示")
-            self.coord_label.config(text="鼠标坐标: (x, y)")
+            self.toggle_coords_btn.config(text="开启取色/坐标")
+            self.coord_label.config(text="鼠标: (x, y) RGB: -")
 
     def _update_mouse_coords_loop(self):
         while self.show_coords:
             try:
                 x, y = pyautogui.position()
-                self.coord_label.config(text=f"鼠标坐标: ({x}, {y})")
+                # 获取当前鼠标位置的颜色 (需要一点点性能，但只在调试时开启)
+                pixel = pyautogui.screenshot(region=(x, y, 1, 1))
+                r, g, b = pixel.getpixel((0, 0))
+                self.coord_label.config(text=f"鼠标: ({x}, {y}) RGB: ({r}, {g}, {b})")
                 time.sleep(0.1)
-            except tk.TclError:
+            except Exception:
                 break
 
     def start_automation(self):
         self.is_running = True
-        self.status_label.config(text="状态: 极速运行中...", foreground="green")
+        self.status_label.config(text="状态: 智能运行中...", foreground="green")
         self.start_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
         try:
             self.current_config = {key: float(entry.get()) for key, entry in self.entries.items()}
         except ValueError:
-            messagebox.showerror("错误", "所有坐标和延时必须是数字！")
+            messagebox.showerror("错误", "所有输入必须是数字！")
             self.stop_automation()
             return
         self.automation_thread = threading.Thread(target=self._automation_loop, daemon=True)
@@ -249,25 +283,31 @@ class App(tk.Tk):
         notify_click_x = monitor_area['left'] + monitor_area['width'] / 2
         notify_click_y = monitor_area['top'] + monitor_area['height'] / 2
 
+        # --- 颜色搜索参数准备 ---
         accept_x = int(cfg['accept_btn_x'])
-        y1 = int(cfg['accept_btn_y1'])
-        y2 = int(cfg['accept_btn_y2'])
-        click_points = [
-            (accept_x, y1),
-            (accept_x, (y1 + y2) // 2),
-            (accept_x, y2)
-        ]
+        search_y1 = int(cfg['search_y1'])
+        search_y2 = int(cfg['search_y2'])
+
+        target_color = np.array([cfg['target_b'], cfg['target_g'], cfg['target_r']])  # MSS 返回的是 BGR
+        tolerance = int(cfg['color_tolerance'])
+
+        # 定义搜索区域 (宽度设为10像素即可，减少计算量)
+        search_monitor = {
+            "left": accept_x - 5,
+            "top": search_y1,
+            "width": 10,
+            "height": search_y2 - search_y1
+        }
 
         confirm_x, confirm_y = int(cfg['confirm_btn_x']), int(cfg['confirm_btn_y'])
         close_x, close_y = int(cfg['close_btn_x']), int(cfg['close_btn_y'])
 
-        print("--- 自动化流程已启动 (无OCR极速版) ---")
+        print("--- 自动化流程已启动 (智能色块定位) ---")
+        print(f"目标颜色 RGB: ({int(cfg['target_r'])}, {int(cfg['target_g'])}, {int(cfg['target_b'])})")
 
         with mss.mss() as sct:
             previous_img_np = np.array(sct.grab(monitor_area))
             print("监控中...")
-
-            last_loop_time = time.time()
 
             while self.is_running:
                 try:
@@ -280,24 +320,43 @@ class App(tk.Tk):
 
                         # 1. 点击通知
                         pyautogui.click(notify_click_x, notify_click_y)
-
-                        # 等待页面加载
                         time.sleep(cfg['delay_after_click_notify'])
 
-                        # 2. 滚动 (包含焦点修复)
+                        # 2. 滚动 (保持修复后的逻辑)
                         pyautogui.moveTo(center_x, center_y)
-                        time.sleep(0.08)  # 关键：给浏览器获取焦点的时间
-
-                        # 爆发式滚动
+                        time.sleep(0.08)
                         pyautogui.scroll(-2000)
                         time.sleep(0.01)
                         pyautogui.scroll(-2000)
-
                         time.sleep(cfg['delay_after_scroll'])
 
-                        # 3. 区域连击
-                        for point in click_points:
-                            pyautogui.click(point[0], point[1])
+                        # 3. 【核心修改】智能色块定位点击
+                        # 截取按钮可能出现的垂直长条区域
+                        search_img = np.array(sct.grab(search_monitor))
+                        # 去掉alpha通道 (BGRA -> BGR)
+                        search_img_bgr = search_img[:, :, :3]
+
+                        # 计算颜色差异
+                        diff = np.abs(search_img_bgr - target_color)
+                        # 找到符合容差的像素点 (所有通道差异都小于容差)
+                        mask = np.all(diff < tolerance, axis=2)
+
+                        # 获取匹配点的坐标
+                        y_indices, x_indices = np.where(mask)
+
+                        if len(y_indices) > 0:
+                            # 找到了！计算平均Y坐标
+                            avg_y_offset = np.mean(y_indices)
+                            real_click_y = search_y1 + avg_y_offset
+
+                            # print(f"定位成功! Y坐标: {real_click_y:.1f}") # 调试用，生产环境可注释
+                            pyautogui.click(accept_x, real_click_y)
+                        else:
+                            # 没找到颜色？可能是颜色设错了，或者按钮没加载出来
+                            # 执行兜底策略：点击搜索区域的中间，或者原来的固定位置
+                            print("未找到目标颜色，执行兜底点击...")
+                            fallback_y = (search_y1 + search_y2) / 2
+                            pyautogui.click(accept_x, fallback_y)
 
                         time.sleep(cfg['delay_after_accept'])
 
@@ -310,15 +369,12 @@ class App(tk.Tk):
                         time.sleep(cfg['delay_after_confirm'])
                         pyautogui.click(close_x, close_y)
 
-                        total_action_time = t_end_action - t0
-                        print(f"\n[抢单报告] 动作总耗时: {total_action_time:.4f} 秒")
+                        print(f"\n[抢单报告] 耗时: {t_end_action - t0:.4f}s")
                         print("------------------------------------")
 
                         time.sleep(2)
                         previous_img_np = np.array(sct.grab(monitor_area))
                         print("--- 返回监控 ---")
-
-                    last_loop_time = time.time()
 
                 except Exception as e:
                     print(f"错误: {e}")
@@ -328,6 +384,5 @@ class App(tk.Tk):
 
 
 if __name__ == "__main__":
-    # 已移除 pytesseract 配置行
     app = App()
     app.mainloop()
