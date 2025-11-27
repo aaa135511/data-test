@@ -23,7 +23,7 @@ def get_application_path(relative_path):
     return os.path.join(application_path, relative_path)
 
 
-# --- 配置文件管理器 (新增颜色配置) ---
+# --- 配置文件管理器 ---
 class ConfigManager:
     def __init__(self):
         self.config_dir = os.path.join(os.path.expanduser("~"), ".auto_order_accepter")
@@ -32,19 +32,19 @@ class ConfigManager:
             "monitor_x1": "100", "monitor_y1": "800",
             "monitor_x2": "600", "monitor_y2": "1000",
             "accept_btn_x": "300",
-            # 搜索范围要大，覆盖有图和无图两种情况
-            "search_y1": "700", "search_y2": "1000",
-            # 【新增】接单按钮的RGB颜色
+            # 【重要】搜索范围要足够大，覆盖无图(高)和有图(低)的所有可能区域
+            "search_y1": "600", "search_y2": "1080",
             "target_r": "255", "target_g": "100", "target_b": "50",
-            "color_tolerance": "20",  # 颜色容差，防止渲染差异
+            "color_tolerance": "25",
 
             "confirm_btn_x": "500", "confirm_btn_y": "550",
             "close_btn_x": "900", "close_btn_y": "100",
             "delay_after_click_notify": "0.3",
-            "delay_after_scroll": "0.05",
+            # 滚动相关的延时已移除，因为我们不再滚动
             "delay_after_accept": "0.05",
             "delay_after_confirm": "1.5",
-            "first_run_timestamp": 0
+            "first_run_timestamp": 0,
+            "license_key": ""  # 隐藏的验证码字段
         }
         os.makedirs(self.config_dir, exist_ok=True)
 
@@ -91,29 +91,24 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.config_manager = ConfigManager()
-        self.check_trial_period()
-        self.title("自动接单助手 (智能色块定位版)")
-        self.geometry("550x750")  # 加高一点
+        # 注意：我们将试用期检查移到了点击“开始”时，
+        # 这样用户才有机会打开软件并在隐藏框输入验证码。
+
+        self.title("自动接单助手 (极速锁定版)")
+        self.geometry("550x760")
         self.attributes('-topmost', True)
         self.entries = {}
         self.automation_thread = None
         self.is_running = False
         self.show_coords = False
+
+        # 【验证码设置】
+        self.SECRET_CODE = "VIP888"
+        self.TRIAL_DURATION = 604800  # 7天 (7 * 24 * 3600)
+
         self.create_widgets()
         self.load_settings()
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
-
-    def check_trial_period(self):
-        config = self.config_manager.load_config()
-        first_run_time = config.get("first_run_timestamp", 0)
-        if first_run_time == 0:
-            config["first_run_timestamp"] = time.time()
-            self.config_manager.save_config(config)
-            return
-        current_time = time.time()
-        if current_time - first_run_time > 60480000:
-            messagebox.showerror("运行错误", "关键组件初始化失败。")
-            sys.exit()
 
     def create_widgets(self):
         main_frame = ttk.Frame(self, padding="10")
@@ -124,7 +119,6 @@ class App(tk.Tk):
         self.add_coord_entry(settings_frame, "监控区左上角 (x1, y1):", "monitor_x1", "monitor_y1", 0)
         self.add_coord_entry(settings_frame, "监控区右下角 (x2, y2):", "monitor_x2", "monitor_y2", 1)
 
-        # 【修改】接单按钮设置
         ttk.Label(settings_frame, text="接单按钮X坐标:").grid(row=2, column=0, sticky='w', padx=5, pady=2)
         self.entries['accept_btn_x'] = ttk.Entry(settings_frame, width=8)
         self.entries['accept_btn_x'].grid(row=2, column=1, padx=5)
@@ -135,19 +129,19 @@ class App(tk.Tk):
         self.entries['search_y2'] = ttk.Entry(settings_frame, width=8)
         self.entries['search_y2'].grid(row=3, column=2, padx=5)
 
-        # 【新增】颜色设置
+        # 颜色设置
         color_frame = ttk.LabelFrame(main_frame, text="接单按钮颜色特征 (RGB)")
         color_frame.pack(fill=tk.X, pady=5)
 
-        ttk.Label(color_frame, text="R(红):").pack(side=tk.LEFT, padx=5)
+        ttk.Label(color_frame, text="R:").pack(side=tk.LEFT, padx=2)
         self.entries['target_r'] = ttk.Entry(color_frame, width=5)
         self.entries['target_r'].pack(side=tk.LEFT)
 
-        ttk.Label(color_frame, text="G(绿):").pack(side=tk.LEFT, padx=5)
+        ttk.Label(color_frame, text="G:").pack(side=tk.LEFT, padx=2)
         self.entries['target_g'] = ttk.Entry(color_frame, width=5)
         self.entries['target_g'].pack(side=tk.LEFT)
 
-        ttk.Label(color_frame, text="B(蓝):").pack(side=tk.LEFT, padx=5)
+        ttk.Label(color_frame, text="B:").pack(side=tk.LEFT, padx=2)
         self.entries['target_b'] = ttk.Entry(color_frame, width=5)
         self.entries['target_b'].pack(side=tk.LEFT)
 
@@ -163,9 +157,8 @@ class App(tk.Tk):
         self.add_coord_entry(other_frame, "关闭按钮 (x, y):", "close_btn_x", "close_btn_y", 1)
 
         self.add_delay_entry(other_frame, "点击通知后延时:", "delay_after_click_notify", 2)
-        self.add_delay_entry(other_frame, "滚动页面后延时:", "delay_after_scroll", 3)
-        self.add_delay_entry(other_frame, "点击接单后延时:", "delay_after_accept", 4)
-        self.add_delay_entry(other_frame, "点击确认后延时:", "delay_after_confirm", 5)
+        self.add_delay_entry(other_frame, "点击接单后延时:", "delay_after_accept", 3)
+        self.add_delay_entry(other_frame, "点击确认后延时:", "delay_after_confirm", 4)
 
         # 工具栏
         coords_frame = ttk.LabelFrame(main_frame, text="工具")
@@ -175,6 +168,7 @@ class App(tk.Tk):
         self.toggle_coords_btn = ttk.Button(coords_frame, text="开启取色/坐标", command=self.toggle_mouse_display)
         self.toggle_coords_btn.pack(side=tk.RIGHT, padx=10)
 
+        # 控制栏
         control_frame = ttk.Frame(main_frame)
         control_frame.pack(fill=tk.X, pady=10)
         self.save_btn = ttk.Button(control_frame, text="保存配置", command=self.save_settings)
@@ -183,6 +177,11 @@ class App(tk.Tk):
         self.start_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
         self.stop_btn = ttk.Button(control_frame, text="停止运行", state=tk.DISABLED, command=self.stop_automation)
         self.stop_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
+
+        # 【隐藏的验证码输入框】
+        # 放在最右边，没有标签，看起来像个多余的UI元素
+        self.entries['license_key'] = ttk.Entry(control_frame, width=8, show="*")  # show="*" 掩盖输入
+        self.entries['license_key'].pack(side=tk.RIGHT, padx=5)
 
         self.status_label = ttk.Label(main_frame, text="状态: 已停止", foreground="red")
         self.status_label.pack(pady=2)
@@ -235,7 +234,6 @@ class App(tk.Tk):
         while self.show_coords:
             try:
                 x, y = pyautogui.position()
-                # 获取当前鼠标位置的颜色 (需要一点点性能，但只在调试时开启)
                 pixel = pyautogui.screenshot(region=(x, y, 1, 1))
                 r, g, b = pixel.getpixel((0, 0))
                 self.coord_label.config(text=f"鼠标: ({x}, {y}) RGB: ({r}, {g}, {b})")
@@ -243,15 +241,47 @@ class App(tk.Tk):
             except Exception:
                 break
 
+    def check_license_and_trial(self):
+        """检查试用期和验证码"""
+        config = self.config_manager.load_config()
+
+        # 1. 检查验证码是否正确
+        user_code = self.entries['license_key'].get()
+        if user_code == self.SECRET_CODE:
+            return True  # 验证码正确，直接通过
+
+        # 2. 检查试用期
+        first_run_time = config.get("first_run_timestamp", 0)
+        if first_run_time == 0:
+            # 第一次运行，记录时间
+            config["first_run_timestamp"] = time.time()
+            self.config_manager.save_config(config)
+            return True
+
+        current_time = time.time()
+        if current_time - first_run_time > self.TRIAL_DURATION:
+            return False  # 试用期已过且无验证码
+
+        return True  # 试用期内
+
     def start_automation(self):
+        # 【试用期检查逻辑】
+        if not self.check_license_and_trial():
+            messagebox.showerror("运行错误", "关键组件初始化失败。 (Error: 0x80070005)")
+            sys.exit()  # 强制退出，模拟崩溃
+
         self.is_running = True
-        self.status_label.config(text="状态: 智能运行中...", foreground="green")
+        self.status_label.config(text="状态: 极速锁定运行中...", foreground="green")
         self.start_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
         try:
-            self.current_config = {key: float(entry.get()) for key, entry in self.entries.items()}
+            # 过滤掉非数字的配置项（比如license_key）
+            self.current_config = {}
+            for key, entry in self.entries.items():
+                if key == 'license_key': continue
+                self.current_config[key] = float(entry.get())
         except ValueError:
-            messagebox.showerror("错误", "所有输入必须是数字！")
+            messagebox.showerror("错误", "所有坐标和延时必须是数字！")
             self.stop_automation()
             return
         self.automation_thread = threading.Thread(target=self._automation_loop, daemon=True)
@@ -277,21 +307,18 @@ class App(tk.Tk):
         }
         PIXEL_CHANGE_THRESHOLD = 100
 
-        screen_width, screen_height = pyautogui.size()
-        center_x, center_y = screen_width / 2, screen_height / 2
-
         notify_click_x = monitor_area['left'] + monitor_area['width'] / 2
         notify_click_y = monitor_area['top'] + monitor_area['height'] / 2
 
-        # --- 颜色搜索参数准备 ---
+        # --- 颜色搜索参数 ---
         accept_x = int(cfg['accept_btn_x'])
         search_y1 = int(cfg['search_y1'])
         search_y2 = int(cfg['search_y2'])
 
-        target_color = np.array([cfg['target_b'], cfg['target_g'], cfg['target_r']])  # MSS 返回的是 BGR
+        target_color = np.array([cfg['target_b'], cfg['target_g'], cfg['target_r']])  # BGR
         tolerance = int(cfg['color_tolerance'])
 
-        # 定义搜索区域 (宽度设为10像素即可，减少计算量)
+        # 垂直搜索条
         search_monitor = {
             "left": accept_x - 5,
             "top": search_y1,
@@ -302,8 +329,8 @@ class App(tk.Tk):
         confirm_x, confirm_y = int(cfg['confirm_btn_x']), int(cfg['confirm_btn_y'])
         close_x, close_y = int(cfg['close_btn_x']), int(cfg['close_btn_y'])
 
-        print("--- 自动化流程已启动 (智能色块定位) ---")
-        print(f"目标颜色 RGB: ({int(cfg['target_r'])}, {int(cfg['target_g'])}, {int(cfg['target_b'])})")
+        print("--- 自动化流程已启动 (Top-Edge Locking) ---")
+        print("提示: 采用高位颜色锁定策略")
 
         with mss.mss() as sct:
             previous_img_np = np.array(sct.grab(monitor_area))
@@ -322,50 +349,42 @@ class App(tk.Tk):
                         pyautogui.click(notify_click_x, notify_click_y)
                         time.sleep(cfg['delay_after_click_notify'])
 
-                        # 2. 滚动 (保持修复后的逻辑)
-                        pyautogui.moveTo(center_x, center_y)
-                        time.sleep(0.08)
-                        pyautogui.scroll(-2000)
-                        time.sleep(0.01)
-                        pyautogui.scroll(-2000)
-                        time.sleep(cfg['delay_after_scroll'])
-
-                        # 3. 【核心修改】智能色块定位点击
-                        # 截取按钮可能出现的垂直长条区域
+                        # 2. 【核心修改】不滚动，直接进行高位锁定搜索
+                        # 截取垂直长条
                         search_img = np.array(sct.grab(search_monitor))
-                        # 去掉alpha通道 (BGRA -> BGR)
                         search_img_bgr = search_img[:, :, :3]
 
-                        # 计算颜色差异
+                        # 颜色匹配
                         diff = np.abs(search_img_bgr - target_color)
-                        # 找到符合容差的像素点 (所有通道差异都小于容差)
                         mask = np.all(diff < tolerance, axis=2)
 
                         # 获取匹配点的坐标
                         y_indices, x_indices = np.where(mask)
 
                         if len(y_indices) > 0:
-                            # 找到了！计算平均Y坐标
-                            avg_y_offset = np.mean(y_indices)
-                            real_click_y = search_y1 + avg_y_offset
+                            # 【关键算法】Top-Edge Locking
+                            # 找到最小的 Y 值 (即最上面的蓝色像素)
+                            min_y_offset = np.min(y_indices)
 
-                            # print(f"定位成功! Y坐标: {real_click_y:.1f}") # 调试用，生产环境可注释
+                            # 向下偏移 10 像素，确保点在按钮内部
+                            real_click_y = search_y1 + min_y_offset + 10
+
+                            # print(f"锁定目标! Y={real_click_y}") # 调试用
                             pyautogui.click(accept_x, real_click_y)
                         else:
-                            # 没找到颜色？可能是颜色设错了，或者按钮没加载出来
-                            # 执行兜底策略：点击搜索区域的中间，或者原来的固定位置
-                            print("未找到目标颜色，执行兜底点击...")
-                            fallback_y = (search_y1 + search_y2) / 2
+                            print("未找到目标颜色，尝试点击默认位置...")
+                            # 兜底：如果没有找到颜色，点搜索区域的顶部1/3处
+                            fallback_y = search_y1 + (search_y2 - search_y1) * 0.3
                             pyautogui.click(accept_x, fallback_y)
 
                         time.sleep(cfg['delay_after_accept'])
 
-                        # 4. 确认
+                        # 3. 确认
                         pyautogui.click(confirm_x, confirm_y)
 
                         t_end_action = time.time()
 
-                        # 5. 后处理
+                        # 4. 后处理
                         time.sleep(cfg['delay_after_confirm'])
                         pyautogui.click(close_x, close_y)
 
