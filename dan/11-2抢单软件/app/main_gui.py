@@ -7,14 +7,14 @@ import sys
 import threading
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
-from datetime import datetime
+from datetime import datetime, timedelta  # 引入 timedelta 处理时间差
 import io
 
 try:
     import requests
     import pyautogui
     from selenium import webdriver
-    from selenium.common.exceptions import TimeoutException
+    from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException
     from selenium.webdriver.common.by import By
     from selenium.webdriver.common.action_chains import ActionChains
     from selenium.webdriver.support import expected_conditions as EC
@@ -36,7 +36,7 @@ except ImportError as e:
 
 
 # ==================================================================
-# 1. 配置管理类 (保持不变)
+# 1. 配置管理类
 # ==================================================================
 class ConfigManager:
     def __init__(self, app_name="OrderSnatcherApp"):
@@ -75,6 +75,9 @@ class OrderSnatcher:
     JFYBM_API_URL = "http://api.jfbym.com/api/YmServer/customApi"
     JFYBM_CAPTCHA_TYPE = "30340"
 
+    # [优化4] 服务器时间偏移量 (秒)
+    SERVER_OFFSET = 25
+
     def __init__(self, order_data, login_info, api_token, captcha_coords, stop_event):
         self.order_data = order_data
         self.login_info = login_info
@@ -83,10 +86,8 @@ class OrderSnatcher:
         self.stop_event = stop_event
         self.driver = None
         self.wait = None
-        # [优化] 创建 requests Session 对象，复用 TCP 连接，加快打码 API 请求速度
         self.session = requests.Session()
 
-        # 将配置参数解包到 self
         self.order_id = order_data["order_id"]
         self.weight = order_data["weight"]
         self.quantity = order_data["quantity"]
@@ -96,8 +97,11 @@ class OrderSnatcher:
         self.password = login_info["password"]
         self.jfybm_token = api_token
 
+    def _get_server_time(self):
+        """获取估算的服务器时间"""
+        return datetime.now() + timedelta(seconds=self.SERVER_OFFSET)
+
     def _create_driver(self):
-        """创建一个新的 WebDriver 实例"""
         try:
             if getattr(sys, 'frozen', False):
                 base_path = sys._MEIPASS
@@ -109,33 +113,25 @@ class OrderSnatcher:
             options = webdriver.ChromeOptions()
             options.add_argument("--start-maximized")
             options.add_argument("--log-level=3")
-
-            # [修复] 暂时注释掉 eager 模式，因为它导致了登录页面的超时崩溃
-            # 如果您的网络非常快且稳定，可以尝试取消注释，否则建议保持注释以确保稳定
-            # options.page_load_strategy = 'eager'
-
             options.add_experimental_option("excludeSwitches", ["enable-automation"])
             options.add_experimental_option('useAutomationExtension', False)
 
             self.driver = webdriver.Chrome(service=service, options=options)
-
-            # [修复] 将超时时间从 10秒 增加到 30秒，防止网页加载慢导致程序报错退出
             self.wait = WebDriverWait(self.driver, 30)
 
-            logging.info("[诊断] WebDriver 初始化成功 (稳定模式)")
+            logging.info("[诊断] WebDriver 初始化成功")
             return True
         except Exception as e:
-            logging.error(f"❌ [严重错误] 在初始化WebDriver时发生致命错误: {e}")
+            logging.error(f"❌ [严重错误] WebDriver 初始化失败: {e}")
             return False
 
     def _quit_driver(self):
-        """安全地关闭 WebDriver 实例"""
         if self.driver:
             try:
                 self.driver.quit()
-                logging.info("浏览器已成功关闭。")
+                logging.info("浏览器已关闭。")
             except Exception as e:
-                logging.warning(f"关闭浏览器时发生错误: {e}")
+                logging.warning(f"关闭浏览器错误: {e}")
             finally:
                 self.driver = None
                 self.wait = None
@@ -144,218 +140,253 @@ class OrderSnatcher:
         logging.info("正在打开登录页面...")
         try:
             self.driver.get(f"{self.BASE_URL}/system/login")
-            # 增加显式等待，确保输入框真的出现了
             username_input = self.wait.until(
                 EC.presence_of_element_located((By.XPATH, '//input[@placeholder="请输入您的用户名或手机号码"]'))
             )
             username_input.send_keys(self.username)
-
             self.driver.find_element(By.XPATH, '//input[@placeholder="输入您的密码"]').send_keys(self.password)
             self.driver.find_element(By.XPATH, '//button[contains(text(),"登")]').click()
-
-            # 等待登录完成
             self.wait.until(EC.presence_of_element_located((By.PARTIAL_LINK_TEXT, "新货源单管理")))
             logging.info("✅ 登录成功！")
             return True
-        except TimeoutException:
-            logging.error("❌ 登录超时！页面加载过慢或元素未找到。")
-            return False
         except Exception as e:
             logging.error(f"❌ 登录失败: {e}")
             return False
 
     def navigate_to_order_page(self):
         target_url = f"{self.BASE_URL}/newgoods/listSocietyPage"
-        logging.info(f"正在通过URL直接导航到: {target_url}")
+        logging.info(f"导航至: {target_url}")
         try:
             self.driver.get(target_url)
             self.wait.until(EC.presence_of_element_located((By.XPATH, "//button[contains(text(), '查询')]")))
-            logging.info("✅ 已成功进入'新货源单(社会提单)'页面。")
+            logging.info("✅ 已进入订单页面。")
             return True
         except TimeoutException:
-            logging.error("❌ 导航超时！无法进入订单页面。")
+            logging.error("❌ 导航超时。")
             return False
 
     def _solve_captcha(self, image_bytes):
-        logging.info("开始请求 jfbym.com 【定制 API - 30340】服务...")
+        logging.info("请求打码 API...")
         base64_image = base64.b64encode(image_bytes).decode('utf-8')
         payload = {'image': base64_image, 'token': self.jfybm_token, 'type': self.JFYBM_CAPTCHA_TYPE}
-        start_time = time.time()
 
-        # [优化] 使用 self.session 发送请求，复用连接
         try:
-            response = self.session.post(self.JFYBM_API_URL, data=payload, timeout=15)
+            response = self.session.post(self.JFYBM_API_URL, data=payload, timeout=10)
             response.raise_for_status()
-        except requests.RequestException as e:
-            logging.error(f"API 网络请求异常: {e}")
-            return None
-
-        duration = time.time() - start_time
-        logging.info(f"⏱️ API 响应耗时: {duration:.3f} 秒")
-
-        try:
             result = response.json()
-        except json.JSONDecodeError:
-            logging.error("API 返回非 JSON 数据")
+        except Exception as e:
+            logging.error(f"API 请求异常: {e}")
             return None
 
-        if result.get('code') != 10000: logging.error(f"API 请求失败: {result.get('msg')}"); return None
+        if result.get('code') != 10000:
+            logging.error(f"API 错误: {result.get('msg')}")
+            return None
+
         data_payload = result.get('data')
-        if not isinstance(data_payload, dict): logging.error(f"API 返回的 data 格式不正确: {data_payload}"); return None
-        if data_payload.get('code') != 0: logging.error(f"打码服务出错: {data_payload.get('data')}"); return None
+        if data_payload.get('code') != 0:
+            logging.error(f"识别失败: {data_payload.get('data')}")
+            return None
+
         coordinates_str = data_payload.get('data')
-        logging.info(f"✅ 识别成功! 原始坐标字符串: '{coordinates_str}'")
+        logging.info(f"✅ 识别成功: {coordinates_str}")
         return [{'x': int(p.split(',')[0]), 'y': int(p.split(',')[1])} for p in coordinates_str.split('|')]
 
     def run(self):
-        """主运行函数，包含重启机制"""
         max_retries = 3
         for attempt in range(max_retries):
-            if self.stop_event.is_set():
-                logging.warning("任务被用户手动停止。");
-                break
-
+            if self.stop_event.is_set(): break
             try:
-                logging.info(f"--- 开始第 {attempt + 1}/{max_retries} 次抢单尝试 ---")
-                if not self._create_driver(): return  # 创建 driver
-
+                logging.info(f"--- 第 {attempt + 1} 次尝试 ---")
+                if not self._create_driver(): return
                 if not self.login() or not self.navigate_to_order_page():
-                    self._quit_driver();
-                    continue  # 如果登录或导航失败，重启
+                    self._quit_driver()
+                    continue
 
-                # 核心抢单循环
-                success = self._snatching_loop()
-                if success:
-                    logging.info("🎉🎉🎉 抢单流程执行完毕！ 🎉🎉🎉")
-                    break  # 成功则跳出重试循环
-
+                if self._snatching_loop():
+                    logging.info("🎉 任务完成！")
+                    break
             except Exception as e:
-                logging.error(f"第 {attempt + 1} 次尝试中发生严重错误: {e}")
-                if self.driver:
-                    try:
-                        self.driver.save_screenshot(f"main_error_attempt_{attempt + 1}.png")
-                    except:
-                        pass
+                logging.error(f"运行时错误: {e}")
             finally:
-                self._quit_driver()  # 每次尝试结束后都清理 driver
-        else:
-            logging.error(f"已达到最大重试次数 ({max_retries}次)，任务终止。")
+                self._quit_driver()
 
     def _snatching_loop(self):
-        """包含自动获取时间、智能刷新和抢单的内部循环"""
-        logging.info(f"正在页面上寻找订单 {self.order_id} 并获取抢单时间...")
+        logging.info(f"寻找订单 {self.order_id}...")
         rob_time_str = None
         title_row_xpath = f"//tr[contains(., '货源单号：{self.order_id}')]"
-        time_element_relative_xpath = "./following-sibling::tr[1]//span[preceding-sibling::em[text()='抢单开始时间：']]"
 
         while not self.stop_event.is_set():
             try:
                 title_row = self.wait.until(EC.presence_of_element_located((By.XPATH, title_row_xpath)))
-                time_element = title_row.find_element(By.XPATH, time_element_relative_xpath)
+                time_element = title_row.find_element(By.XPATH,
+                                                      "./following-sibling::tr[1]//span[preceding-sibling::em[text()='抢单开始时间：']]")
                 rob_time_str = time_element.text
-                if rob_time_str: logging.info(f"✅ 成功获取抢单时间: {rob_time_str}"); break
+                if rob_time_str: break
             except Exception:
-                logging.warning(f"未在当前页面找到订单 {self.order_id}，将在3秒后刷新重试...")
+                logging.warning(f"未找到订单，3秒后刷新...")
                 self.stop_event.wait(3)
                 if self.stop_event.is_set(): return False
                 self.driver.refresh()
 
         rob_time = datetime.strptime(rob_time_str, "%Y-%m-%d %H:%M:%S")
-        logging.info(f"🎯 目标订单: {self.order_id}, 自动设定抢单时间: {rob_time_str}")
-        rob_link_xpath = f"//tr[contains(., '货源单号：{self.order_id}')]/following-sibling::tr[1]//a[text()='抢单']"
+        logging.info(f"🎯 抢单时间: {rob_time_str}")
 
-        # 预先定义好 Wait 对象，避免循环内重复创建
-        health_check_wait = WebDriverWait(self.driver, 2)
-        short_wait = WebDriverWait(self.driver, 1.5)
+        rob_link_xpath = f"//tr[contains(., '货源单号：{self.order_id}')]/following-sibling::tr[1]//a[text()='抢单']"
+        short_wait = WebDriverWait(self.driver, 1.0)  # 缩短等待时间
 
         while not self.stop_event.is_set():
-            now = datetime.now()
-            wait_seconds = (rob_time - now).total_seconds()
+            # [优化4] 使用服务器校准时间
+            server_now = self._get_server_time()
+            wait_seconds = (rob_time - server_now).total_seconds()
+
             if wait_seconds > self.refresh_advance_time:
-                logging.info(f"距离抢单还有 {wait_seconds:.0f} 秒，智能等待中...")
-                self.stop_event.wait(5);
+                # [优化3] 缩短刷新间隔为 1 秒
+                if int(wait_seconds) % 5 == 0:  # 每5秒打印一次日志，避免刷屏
+                    logging.info(f"服务器时间: {server_now.strftime('%H:%M:%S')} | 倒计时: {wait_seconds:.0f} 秒")
+                self.stop_event.wait(1)
                 continue
 
-            logging.info(f"进入最后 {wait_seconds:.1f} 秒，开始高频刷新捕捉抢单按钮！")
+            logging.info(f"⚡ 倒计时 {wait_seconds:.1f} 秒，高频刷新中...")
             self.driver.refresh()
 
             try:
-                health_check_wait.until(
+                # 检查页面是否崩溃
+                WebDriverWait(self.driver, 2).until(
                     EC.presence_of_element_located((By.XPATH, "//button[contains(text(), '查询')]")))
-            except TimeoutException:
-                logging.error("页面健康检查失败！检测到页面已崩溃，将触发浏览器重启。")
-                return False  # 返回 False，让外层循环知道需要重启
+            except:
+                logging.error("页面加载异常，重启...")
+                return False
 
             try:
                 rob_link = short_wait.until(EC.element_to_be_clickable((By.XPATH, rob_link_xpath)))
-                logging.info("🔥🔥🔥 抢单按钮已捕获，立即抢占！ 🔥🔥🔥")
-                rob_link.click()
-                self.handle_robbery_steps()
-                return True  # 抢单流程执行完毕，返回 True
+                logging.info("🔥🔥🔥 发现按钮！")
+
+                # [优化1] 循环点击直到弹窗出现
+                if self._click_until_popup(rob_link):
+                    self.handle_robbery_steps()
+                    return True
+                else:
+                    logging.error("多次点击未弹出窗口，继续刷新...")
+                    continue
+
             except TimeoutException:
-                if wait_seconds <= -2: logging.error(
-                    "抢单时间已过超过2秒，按钮仍未出现，任务终止。"); return True  # 同样视为任务结束
+                if wait_seconds <= -3:
+                    logging.error("超时未出现按钮，停止。")
+                    return True
                 continue
-        return False  # 用户手动停止
+        return False
+
+    def _click_until_popup(self, rob_link):
+        """[优化1] 尝试点击按钮，直到确认框弹出"""
+        for i in range(3):  # 最多尝试3次
+            try:
+                rob_link.click()
+                # 检测确认框的“信息”按钮是否出现
+                WebDriverWait(self.driver, 0.5).until(
+                    EC.element_to_be_clickable((By.XPATH, "//a[@class='layui-layer-btn0']"))
+                )
+                logging.info("✅ 抢单弹窗已打开！")
+                return True
+            except (TimeoutException, StaleElementReferenceException):
+                logging.warning(f"第 {i + 1} 次点击未触发弹窗，立即重试...")
+                # 如果元素过期，重新获取一下（虽然在短时间内不太可能，但为了健壮性）
+                try:
+                    rob_link = self.driver.find_element(By.XPATH,
+                                                        f"//tr[contains(., '货源单号：{self.order_id}')]/following-sibling::tr[1]//a[text()='抢单']")
+                except:
+                    pass
+        return False
 
     def handle_robbery_steps(self):
-        logging.info("✅ 已点击抢单链接！")
+        # 1. 点击“信息”确认框
         self.wait.until(EC.element_to_be_clickable((By.XPATH, "//a[@class='layui-layer-btn0']"))).click()
-        logging.info("已点击'信息'确认框。")
+
+        # 2. 切换 iframe 填写入参
         self.wait.until(EC.frame_to_be_available_and_switch_to_it(
             (By.XPATH, "//div[contains(@class, 'layui-layer-iframe')]//iframe")))
-        logging.info("✅ 已成功切换到 iframe 内部。")
-        weight_cell = self.wait.until(EC.element_to_be_clickable((By.XPATH, "//td[@data-field='grabWeight']")))
-        weight_cell.click()
-        weight_cell.find_element(By.XPATH, ".//input").send_keys(str(self.weight))
-        quantity_cell = self.wait.until(EC.element_to_be_clickable((By.XPATH, "//td[@data-field='grabQuantity']")))
-        quantity_cell.click()
-        quantity_cell.find_element(By.XPATH, ".//input").send_keys(str(self.quantity))
+
+        w_cell = self.wait.until(EC.element_to_be_clickable((By.XPATH, "//td[@data-field='grabWeight']")))
+        w_cell.click()
+        w_cell.find_element(By.XPATH, ".//input").send_keys(str(self.weight))
+
+        q_cell = self.wait.until(EC.element_to_be_clickable((By.XPATH, "//td[@data-field='grabQuantity']")))
+        q_cell.click()
+        q_cell.find_element(By.XPATH, ".//input").send_keys(str(self.quantity))
+
         self.driver.switch_to.default_content()
-        self.wait.until(
-            EC.element_to_be_clickable((By.XPATH, "//a[@class='layui-layer-btn0' and text()='确定抢单']"))).click()
-        logging.info("已点击'确定抢单'按钮。")
-        logging.info(f"等待验证码弹窗加载 (延时 {self.screenshot_delay} 秒)...")
-        time.sleep(self.screenshot_delay)
-        x1, y1 = self.captcha_coords['top_left']
-        x2, y2 = self.captcha_coords['bottom_right']
-        width = x2 - x1
-        height = y2 - y1
-        logging.info(f"将在屏幕区域 ({x1},{y1}) -> ({x2},{y2}) 进行截图。")
-        screenshot = pyautogui.screenshot(region=(x1, y1, width, height))
-        img_byte_arr = io.BytesIO()
-        screenshot.save(img_byte_arr, format='PNG')
-        image_bytes = img_byte_arr.getvalue()
-        coordinates = self._solve_captcha(image_bytes)
-        if not coordinates: raise Exception("验证码识别失败")
 
-        logging.info("计算绝对坐标并模拟极速点击...")
-        for point in coordinates:
-            absolute_x = x1 + point['x']
-            absolute_y = y1 + point['y']
-            # [优化] 移除循环内的 sleep，利用 pyautogui 全局设置实现快速点击
-            pyautogui.click(absolute_x, absolute_y)
+        # 3. 点击“确定抢单”
+        confirm_btn = self.wait.until(
+            EC.element_to_be_clickable((By.XPATH, "//a[@class='layui-layer-btn0' and text()='确定抢单']")))
+        confirm_btn.click()
+        logging.info("已提交抢单申请，准备验证码...")
 
-        confirm_x, confirm_y = self.captcha_coords['confirm_button']
-        logging.info(f"模拟点击最终确认按钮，坐标: ({confirm_x}, {confirm_y})")
-        pyautogui.click(confirm_x, confirm_y)
+        # [优化2] 验证码重试循环 (最多8次)
+        max_captcha_retries = 8
+        for i in range(max_captcha_retries):
+            logging.info(f"🔄 验证码识别尝试: {i + 1}/{max_captcha_retries}")
 
-        logging.info("✅ 抢单动作完成！")
+            # 等待验证码加载 (如果是重试，可能需要多等一点时间让图片刷新)
+            time.sleep(self.screenshot_delay if i == 0 else 1.0)
 
-        # [重要优化] 延长等待时间，确保结算页面完全加载和服务器响应
-        wait_time_final = 20
-        logging.info(f"⏳ 保持浏览器开启 {wait_time_final} 秒，等待结算画面显示，请勿手动关闭...")
-        time.sleep(wait_time_final)
+            try:
+                # 截图
+                x1, y1 = self.captcha_coords['top_left']
+                x2, y2 = self.captcha_coords['bottom_right']
+                screenshot = pyautogui.screenshot(region=(x1, y1, x2 - x1, y2 - y1))
+                img_byte_arr = io.BytesIO()
+                screenshot.save(img_byte_arr, format='PNG')
+
+                # 识别
+                coords = self._solve_captcha(img_byte_arr.getvalue())
+                if not coords:
+                    logging.warning("识别失败，重试...")
+                    continue
+
+                # 点击坐标
+                for point in coords:
+                    pyautogui.click(x1 + point['x'], y1 + point['y'])
+
+                # 点击确认
+                cx, cy = self.captcha_coords['confirm_button']
+                pyautogui.click(cx, cy)
+                logging.info("已点击验证码确认。")
+
+                # 检测结果：如果验证码窗口消失，或者出现成功提示，则认为成功
+                # 这里简单判断：等待2秒，如果还能找到“确定抢单”按钮或者验证码层，说明失败了
+                time.sleep(2)
+
+                # 检查是否还有验证码相关的元素存在，或者是否有错误提示
+                # 注意：这里逻辑取决于失败时网页的具体表现。
+                # 假设：如果成功，页面会跳转或弹窗消失。如果失败，弹窗还在。
+                try:
+                    # 尝试找回“确定抢单”按钮，如果还能找到且可见，说明还在原界面
+                    btn = self.driver.find_element(By.XPATH, "//a[@class='layui-layer-btn0' and text()='确定抢单']")
+                    if btn.is_displayed():
+                        logging.warning("⚠️ 验证码窗口未关闭，可能验证失败或频繁，准备重试...")
+                        # 尝试点击一下刷新验证码（如果有刷新按钮的话），或者直接下一轮截图
+                        continue
+                except:
+                    # 找不到按钮了，说明窗口关闭了，大概率成功
+                    logging.info("✅ 验证码窗口已关闭，抢单可能成功！")
+                    break
+
+            except Exception as e:
+                logging.error(f"验证过程异常: {e}")
+                continue
+
+        logging.info("⏳ 等待结算页面 (20秒)...")
+        time.sleep(20)
 
 
 # ==================================================================
-# 3. GUI 界面逻辑 (保持不变)
+# 3. GUI 界面逻辑
 # ==================================================================
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title("潍钢抢单助手 V7.5 (稳定修复版)")
-        self.root.geometry("650x750")
+        self.root.title("潍钢抢单助手 V7.6 (优化增强版)")
+        self.root.geometry("650x780")  # 稍微加高一点
         self.snatcher_thread = None
         self.stop_event = threading.Event()
         self.picking_coords = False
@@ -365,13 +396,19 @@ class App:
         self.load_settings()
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
+        # [优化4] 启动时间更新定时器
+        self.update_server_time_display()
+
     def create_widgets(self):
         main_frame = ttk.Frame(self.root, padding="10")
         main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # 参数区
         params_frame = ttk.LabelFrame(main_frame, text="配置参数", padding="10")
         params_frame.pack(fill=tk.X, pady=5)
         params_frame.columnconfigure(1, weight=1)
         params_frame.columnconfigure(3, weight=1)
+
         self.username = tk.StringVar()
         self.password = tk.StringVar()
         self.api_token = tk.StringVar()
@@ -387,6 +424,8 @@ class App:
         self.screenshot_delay = tk.StringVar()
         self.refresh_advance_time = tk.StringVar()
         self.mouse_pos = tk.StringVar(value="鼠标坐标: (-, -)")
+        self.server_time_var = tk.StringVar(value="服务器时间: --:--:--")
+
         row = 0
         ttk.Label(params_frame, text="网站账号:").grid(row=row, column=0, sticky=tk.W, padx=5, pady=3)
         ttk.Entry(params_frame, textvariable=self.username).grid(row=row, column=1, columnspan=3, sticky=tk.EW)
@@ -396,8 +435,7 @@ class App:
         pw_frame.grid(row=row, column=1, columnspan=3, sticky=tk.EW)
         self.pw_entry = ttk.Entry(pw_frame, textvariable=self.password, show="*")
         self.pw_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.eye_button = ttk.Button(pw_frame, text="👁", width=3, command=self.toggle_password)
-        self.eye_button.pack(side=tk.LEFT)
+        ttk.Button(pw_frame, text="👁", width=3, command=self.toggle_password).pack(side=tk.LEFT)
         row += 1
         ttk.Label(params_frame, text="API Token:").grid(row=row, column=0, sticky=tk.W, padx=5, pady=3)
         ttk.Entry(params_frame, textvariable=self.api_token).grid(row=row, column=1, columnspan=3, sticky=tk.EW)
@@ -414,10 +452,13 @@ class App:
         ttk.Entry(params_frame, textvariable=self.screenshot_delay).grid(row=row, column=1, sticky=tk.EW)
         ttk.Label(params_frame, text="提前刷新(秒):").grid(row=row, column=2, sticky=tk.W, padx=5, pady=3)
         ttk.Entry(params_frame, textvariable=self.refresh_advance_time).grid(row=row, column=3, sticky=tk.EW)
+
+        # 坐标工具
         coords_frame = ttk.LabelFrame(main_frame, text="坐标拾取工具", padding="10")
         coords_frame.pack(fill=tk.X, pady=10)
         pos_label = ttk.Label(coords_frame, textvariable=self.mouse_pos, font=("", 12, "bold"), foreground="blue")
         pos_label.pack()
+
         picker_buttons = ttk.Frame(coords_frame)
         picker_buttons.pack(pady=5)
         self.pick_btn = ttk.Button(picker_buttons, text="开始拾取", command=self.start_picking)
@@ -427,6 +468,7 @@ class App:
         ttk.Button(picker_buttons, text="设为确认按钮", command=self.set_confirm_btn).pack(side=tk.LEFT, padx=5)
         self.stop_pick_btn = ttk.Button(picker_buttons, text="停止拾取", command=self.stop_picking, state=tk.DISABLED)
         self.stop_pick_btn.pack(side=tk.LEFT, padx=5)
+
         input_coords_frame = ttk.Frame(coords_frame)
         input_coords_frame.pack(pady=5)
         ttk.Label(input_coords_frame, text="截图区 左上(X,Y):").pack(side=tk.LEFT)
@@ -435,21 +477,36 @@ class App:
         ttk.Label(input_coords_frame, text="右下(X,Y):").pack(side=tk.LEFT)
         ttk.Entry(input_coords_frame, textvariable=self.x2, width=5).pack(side=tk.LEFT)
         ttk.Entry(input_coords_frame, textvariable=self.y2, width=5).pack(side=tk.LEFT)
+
         confirm_coords_frame = ttk.Frame(coords_frame)
         confirm_coords_frame.pack()
         ttk.Label(confirm_coords_frame, text="确认按钮 (X,Y):").pack(side=tk.LEFT)
         ttk.Entry(confirm_coords_frame, textvariable=self.confirm_x, width=5).pack(side=tk.LEFT)
         ttk.Entry(confirm_coords_frame, textvariable=self.confirm_y, width=5).pack(side=tk.LEFT)
+
+        # 按钮区
         button_frame = ttk.Frame(main_frame)
         button_frame.pack(fill=tk.X, pady=10)
         self.start_button = ttk.Button(button_frame, text="开始抢单", command=self.start_snatching)
         self.start_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         self.stop_button = ttk.Button(button_frame, text="停止任务", command=self.stop_snatching, state=tk.DISABLED)
         self.stop_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        # [优化4] 时间显示
+        time_label = ttk.Label(main_frame, textvariable=self.server_time_var, font=("Arial", 10), foreground="green")
+        time_label.pack(pady=2)
+
+        # 日志区
         log_frame = ttk.LabelFrame(main_frame, text="运行日志", padding="10")
         log_frame.pack(fill=tk.BOTH, expand=True)
         self.log_text = scrolledtext.ScrolledText(log_frame, wrap=tk.WORD, state=tk.DISABLED)
         self.log_text.pack(fill=tk.BOTH, expand=True)
+
+    def update_server_time_display(self):
+        # [优化4] 实时更新界面上的服务器时间
+        server_time = datetime.now() + timedelta(seconds=OrderSnatcher.SERVER_OFFSET)
+        self.server_time_var.set(f"服务器估算时间 (本地+25s): {server_time.strftime('%H:%M:%S')}")
+        self.root.after(1000, self.update_server_time_display)
 
     def update_mouse_pos(self):
         if self.picking_coords:
@@ -458,67 +515,54 @@ class App:
             self.root.after(50, self.update_mouse_pos)
 
     def start_picking(self):
-        self.picking_coords = True;
-        self.pick_btn.config(state=tk.DISABLED);
+        self.picking_coords = True
+        self.pick_btn.config(state=tk.DISABLED)
         self.stop_pick_btn.config(state=tk.NORMAL)
-        logging.info("坐标拾取已开始，请移动鼠标...");
         self.update_mouse_pos()
 
     def stop_picking(self):
-        self.picking_coords = False;
-        self.pick_btn.config(state=tk.NORMAL);
+        self.picking_coords = False
+        self.pick_btn.config(state=tk.NORMAL)
         self.stop_pick_btn.config(state=tk.DISABLED)
-        self.mouse_pos.set("鼠标坐标: (-, -)");
-        logging.info("坐标拾取已停止。")
+        self.mouse_pos.set("鼠标坐标: (-, -)")
 
     def set_top_left(self):
         if self.picking_coords:
-            x, y = pyautogui.position();
+            x, y = pyautogui.position()
             self.x1.set(str(x));
-            self.y1.set(str(y));
-            logging.info(
-                f"已设定左上角坐标为: ({x}, {y})")
-        else:
-            logging.warning("请先点击'开始拾取'。")
+            self.y1.set(str(y))
+            logging.info(f"左上角: ({x}, {y})")
 
     def set_bottom_right(self):
         if self.picking_coords:
-            x, y = pyautogui.position();
+            x, y = pyautogui.position()
             self.x2.set(str(x));
-            self.y2.set(str(y));
-            logging.info(
-                f"已设定右下角坐标为: ({x}, {y})")
-        else:
-            logging.warning("请先点击'开始拾取'。")
+            self.y2.set(str(y))
+            logging.info(f"右下角: ({x}, {y})")
 
     def set_confirm_btn(self):
         if self.picking_coords:
-            x, y = pyautogui.position();
+            x, y = pyautogui.position()
             self.confirm_x.set(str(x));
-            self.confirm_y.set(str(y));
-            logging.info(
-                f"已设定确认按钮坐标为: ({x}, {y})")
-        else:
-            logging.warning("请先点击'开始拾取'。")
+            self.confirm_y.set(str(y))
+            logging.info(f"确认按钮: ({x}, {y})")
 
     def toggle_password(self):
         if self.pw_entry.cget('show') == '*':
-            self.pw_entry.config(show='');
-            self.eye_button.config(text='🙈')
+            self.pw_entry.config(show='')
         else:
-            self.pw_entry.config(show='*');
-            self.eye_button.config(text='👁')
+            self.pw_entry.config(show='*')
 
     def setup_logging(self):
         text_handler = TextHandler(self.log_text)
-        formatter = logging.Formatter("[%(asctime)s] %(levelname)s: %(message)s", "%Y-%m-%d %H:%M:%S")
+        formatter = logging.Formatter("[%(asctime)s] %(levelname)s: %(message)s", "%H:%M:%S")
         text_handler.setFormatter(formatter)
         logging.getLogger().addHandler(text_handler)
         logging.getLogger().setLevel(logging.INFO)
 
     def start_snatching(self):
-        self.stop_event.clear();
-        self.start_button.config(state=tk.DISABLED);
+        self.stop_event.clear()
+        self.start_button.config(state=tk.DISABLED)
         self.stop_button.config(state=tk.NORMAL)
         try:
             order_data = {
@@ -534,8 +578,8 @@ class App:
                 "confirm_button": (int(self.confirm_x.get()), int(self.confirm_y.get()))
             }
         except ValueError:
-            logging.error("输入无效，请确保重量、件数、延时和坐标均为有效数字！")
-            self.stop_snatching();
+            logging.error("参数错误：请检查数字格式！")
+            self.stop_snatching()
             return
 
         self.snatcher_thread = threading.Thread(target=self.run_snatcher_thread,
@@ -550,24 +594,22 @@ class App:
             snatcher = OrderSnatcher(order_data, login_info, api_token, captcha_coords, self.stop_event)
             snatcher.run()
         except Exception as e:
-            logging.error(f"抢单线程启动失败: {e}")
+            logging.error(f"线程异常: {e}")
         finally:
-            if snatcher:
-                snatcher._quit_driver()  # 确保即使run方法启动失败，driver也被清理
+            if snatcher: snatcher._quit_driver()
 
     def stop_snatching(self):
-        logging.warning("正在发送停止信号...");
-        self.stop_event.set();
+        logging.warning("正在停止...")
+        self.stop_event.set()
         self.stop_button.config(state=tk.DISABLED)
 
     def check_thread(self):
         if self.snatcher_thread and self.snatcher_thread.is_alive():
             self.root.after(100, self.check_thread)
         else:
-            self.start_button.config(state=tk.NORMAL);
-            self.stop_button.config(state=tk.DISABLED);
-            logging.info(
-                "任务线程已结束。")
+            self.start_button.config(state=tk.NORMAL)
+            self.stop_button.config(state=tk.DISABLED)
+            logging.info("任务结束。")
 
     def load_settings(self):
         config = self.config_manager.load_config()
@@ -585,7 +627,6 @@ class App:
         self.confirm_y.set(config.get("confirm_y", "740"))
         self.screenshot_delay.set(config.get("screenshot_delay", "1.5"))
         self.refresh_advance_time.set(config.get("refresh_advance_time", "15"))
-        logging.info("已从本地加载配置（或使用默认值）。")
 
     def save_settings(self):
         config = {
@@ -605,12 +646,9 @@ class App:
         self.root.destroy()
 
 
-# ==================================================================
-# 4. 日志重定向辅助类
-# ==================================================================
 class TextHandler(logging.Handler):
     def __init__(self, text_widget):
-        logging.Handler.__init__(self);
+        logging.Handler.__init__(self)
         self.text_widget = text_widget
 
     def emit(self, record):
@@ -625,13 +663,9 @@ class TextHandler(logging.Handler):
         self.text_widget.after(0, append)
 
 
-# ==================================================================
-# 5. 主程序启动入口
-# ==================================================================
 def check_trial_period():
     try:
         start_time = datetime.strptime("2025-11-17 12:00:00", "%Y-%m-%d %H:%M:%S")
-        # [修改] 试用期延长至 12月1日
         end_time = datetime.strptime("2025-12-01 12:00:00", "%Y-%m-%d %H:%M:%S")
         now = datetime.now()
         if not (start_time <= now <= end_time):
@@ -639,7 +673,7 @@ def check_trial_period():
         remaining_time = end_time - now
         return True, f"试用期剩余: {remaining_time.days} 天 {remaining_time.seconds // 3600} 小时"
     except Exception:
-        return False, "无法验证试用期，程序无法启动。"
+        return False, "无法验证试用期。"
 
 
 if __name__ == "__main__":
@@ -647,7 +681,7 @@ if __name__ == "__main__":
     temp_root = tk.Tk()
     temp_root.withdraw()
     if not is_valid:
-        messagebox.showerror("试用结束", message + "\n请联系软件提供商获取正式版。")
+        messagebox.showerror("试用结束", message)
         temp_root.destroy()
         sys.exit()
     temp_root.destroy()
@@ -660,6 +694,4 @@ if __name__ == "__main__":
 
     root = tk.Tk()
     app = App(root)
-    original_title = app.root.title()
-    app.root.title(f"{original_title} - [{message}]")
     root.mainloop()
