@@ -8,6 +8,7 @@ import os
 import numpy as np
 import sys
 import mss
+import mss.tools  # 引入工具用于保存调试图片
 from datetime import datetime, timedelta
 
 # --- 全局极速设置 ---
@@ -32,16 +33,16 @@ class ConfigManager:
         self.defaults = {
             "monitor_x1": "100", "monitor_y1": "800",
             "monitor_x2": "600", "monitor_y2": "1000",
-            "accept_btn_x": "300",
-            "search_y1": "600", "search_y2": "1080",
-            "target_r": "255", "target_g": "100", "target_b": "50",
-            "color_tolerance": "25",
+            "accept_btn_x": "220",  # 用户当前的设置
+            "search_y1": "700", "search_y2": "1015",
+            "target_r": "46", "target_g": "150", "target_b": "213",
+            "color_tolerance": "30",  # 稍微调大一点容差
             "confirm_btn_x": "500", "confirm_btn_y": "550",
             "close_btn_x": "900", "close_btn_y": "100",
             "delay_after_click_notify": "0.3",
             "delay_after_accept": "0.05",
             "delay_after_confirm": "1.5",
-            "license_key": ""  # 验证码保存字段
+            "license_key": ""
         }
         os.makedirs(self.config_dir, exist_ok=True)
 
@@ -89,19 +90,15 @@ class App(tk.Tk):
         super().__init__()
         self.config_manager = ConfigManager()
 
-        self.title("自动接单助手 (极速锁定版)")
-        self.geometry("550x760")
+        self.title("自动接单助手 (调试增强版)")
+        self.geometry("580x780")  # 稍微加宽一点显示日志
         self.attributes('-topmost', True)
         self.entries = {}
         self.automation_thread = None
         self.is_running = False
         self.show_coords = False
 
-        # 【验证码与试用期设置】
         self.SECRET_CODE = "VIP888"
-
-        # 设定试用期结束时间：2025年12月5日 00:00:00 (11月28日 + 7天)
-        # 你可以修改这里的年、月、日
         self.TRIAL_END_DATE = datetime(2025, 12, 5, 0, 0, 0)
 
         self.create_widgets()
@@ -176,7 +173,6 @@ class App(tk.Tk):
         self.stop_btn = ttk.Button(control_frame, text="停止运行", state=tk.DISABLED, command=self.stop_automation)
         self.stop_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
 
-        # 【隐藏的验证码输入框】
         self.entries['license_key'] = ttk.Entry(control_frame, width=8, show="*")
         self.entries['license_key'].pack(side=tk.RIGHT, padx=5)
 
@@ -185,7 +181,7 @@ class App(tk.Tk):
 
         log_frame = ttk.LabelFrame(main_frame, text="运行日志")
         log_frame.pack(fill=tk.BOTH, expand=True, pady=5)
-        self.log_text = scrolledtext.ScrolledText(log_frame, height=8, wrap=tk.WORD)
+        self.log_text = scrolledtext.ScrolledText(log_frame, height=10, wrap=tk.WORD)
         self.log_text.pack(fill=tk.BOTH, expand=True)
         sys.stdout = TextRedirector(self.log_text)
         sys.stderr = TextRedirector(self.log_text)
@@ -210,7 +206,6 @@ class App(tk.Tk):
 
     def save_settings(self):
         data = {key: entry.get() for key, entry in self.entries.items()}
-        # 移除旧的时间戳保存逻辑，只保存界面上的数据
         if self.config_manager.save_config(data):
             messagebox.showinfo("成功", "配置已成功保存！")
         else:
@@ -238,28 +233,21 @@ class App(tk.Tk):
                 break
 
     def check_license_and_trial(self):
-        """检查试用期和验证码"""
-        # 1. 优先检查验证码 (如果输入了正确的码，永久解锁)
         user_code = self.entries['license_key'].get()
         if user_code == self.SECRET_CODE:
             return True
-
-            # 2. 检查固定日期试用期
         current_time = datetime.now()
         if current_time < self.TRIAL_END_DATE:
-            return True  # 在试用期截止日期之前，允许使用
-
-        # 3. 既无验证码，又过了试用期
+            return True
         return False
 
     def start_automation(self):
-        # 【试用期检查】
         if not self.check_license_and_trial():
             messagebox.showerror("运行错误", "关键组件初始化失败。 (Error: 0x80070005)")
-            sys.exit()  # 强制退出
+            sys.exit()
 
         self.is_running = True
-        self.status_label.config(text="状态: 极速锁定运行中...", foreground="green")
+        self.status_label.config(text="状态: 运行中...", foreground="green")
         self.start_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
         try:
@@ -297,7 +285,6 @@ class App(tk.Tk):
         notify_click_x = monitor_area['left'] + monitor_area['width'] / 2
         notify_click_y = monitor_area['top'] + monitor_area['height'] / 2
 
-        # --- 颜色搜索参数 ---
         accept_x = int(cfg['accept_btn_x'])
         search_y1 = int(cfg['search_y1'])
         search_y2 = int(cfg['search_y2'])
@@ -305,18 +292,18 @@ class App(tk.Tk):
         target_color = np.array([cfg['target_b'], cfg['target_g'], cfg['target_r']])  # BGR
         tolerance = int(cfg['color_tolerance'])
 
-        # 垂直搜索条
+        # 【优化】将搜索宽度增加到 20，防止X轴微小偏差导致切到文字
         search_monitor = {
-            "left": accept_x - 5,
+            "left": accept_x - 10,
             "top": search_y1,
-            "width": 10,
+            "width": 20,
             "height": search_y2 - search_y1
         }
 
         confirm_x, confirm_y = int(cfg['confirm_btn_x']), int(cfg['confirm_btn_y'])
         close_x, close_y = int(cfg['close_btn_x']), int(cfg['close_btn_y'])
 
-        print("--- 自动化流程已启动 (Top-Edge Locking) ---")
+        print("--- 自动化流程已启动 ---")
 
         with mss.mss() as sct:
             previous_img_np = np.array(sct.grab(monitor_area))
@@ -336,8 +323,9 @@ class App(tk.Tk):
                         time.sleep(cfg['delay_after_click_notify'])
 
                         # 2. 高位锁定搜索
-                        search_img = np.array(sct.grab(search_monitor))
-                        search_img_bgr = search_img[:, :, :3]
+                        search_img = sct.grab(search_monitor)  # 获取MSS对象
+                        search_img_np = np.array(search_img)  # 转Numpy
+                        search_img_bgr = search_img_np[:, :, :3]  # 提取BGR
 
                         diff = np.abs(search_img_bgr - target_color)
                         mask = np.all(diff < tolerance, axis=2)
@@ -345,13 +333,34 @@ class App(tk.Tk):
                         y_indices, x_indices = np.where(mask)
 
                         if len(y_indices) > 0:
-                            # 找到最上面的蓝色像素
                             min_y_offset = np.min(y_indices)
-                            # 向下偏移 10 像素
                             real_click_y = search_y1 + min_y_offset + 10
+                            print(f"锁定成功! 坐标: ({accept_x}, {real_click_y})")
                             pyautogui.click(accept_x, real_click_y)
                         else:
-                            print("未找到目标颜色，尝试点击默认位置...")
+                            # 【调试核心】详细分析为什么没找到
+                            print("未找到目标颜色!")
+
+                            # 计算整个区域内最接近的颜色
+                            # 对每个像素求RGB三个通道的平均差异
+                            mean_diff_per_pixel = np.mean(diff, axis=2)
+                            min_diff_val = np.min(mean_diff_per_pixel)
+
+                            # 找到最接近的那个像素的坐标
+                            min_loc = np.unravel_index(np.argmin(mean_diff_per_pixel), mean_diff_per_pixel.shape)
+                            closest_pixel_bgr = search_img_bgr[min_loc[0], min_loc[1]]
+                            closest_pixel_rgb = closest_pixel_bgr[::-1]  # 转回RGB方便阅读
+
+                            print(f" > 区域内最小色差: {min_diff_val:.1f} (阈值: {tolerance})")
+                            print(f" > 最接近的颜色 RGB: {closest_pixel_rgb}")
+                            print(f" > 建议: 检查X轴是否对准，或将容差设为 {int(min_diff_val) + 5}")
+
+                            # 保存调试图片
+                            debug_filename = "debug_error_strip.png"
+                            mss.tools.to_png(search_img.rgb, search_img.size, output=debug_filename)
+                            print(f" > 已保存调试图片: {debug_filename} (请查看是否截到了按钮)")
+
+                            # 兜底点击
                             fallback_y = search_y1 + (search_y2 - search_y1) * 0.3
                             pyautogui.click(accept_x, fallback_y)
 
@@ -366,7 +375,7 @@ class App(tk.Tk):
                         time.sleep(cfg['delay_after_confirm'])
                         pyautogui.click(close_x, close_y)
 
-                        print(f"\n[抢单报告] 耗时: {t_end_action - t0:.4f}s")
+                        print(f"[抢单报告] 耗时: {t_end_action - t0:.4f}s")
                         print("------------------------------------")
 
                         time.sleep(2)
