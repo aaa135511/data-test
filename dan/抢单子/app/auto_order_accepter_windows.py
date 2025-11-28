@@ -8,6 +8,7 @@ import os
 import numpy as np
 import sys
 import mss
+from datetime import datetime, timedelta
 
 # --- 全局极速设置 ---
 pyautogui.PAUSE = 0
@@ -32,19 +33,15 @@ class ConfigManager:
             "monitor_x1": "100", "monitor_y1": "800",
             "monitor_x2": "600", "monitor_y2": "1000",
             "accept_btn_x": "300",
-            # 【重要】搜索范围要足够大，覆盖无图(高)和有图(低)的所有可能区域
             "search_y1": "600", "search_y2": "1080",
             "target_r": "255", "target_g": "100", "target_b": "50",
             "color_tolerance": "25",
-
             "confirm_btn_x": "500", "confirm_btn_y": "550",
             "close_btn_x": "900", "close_btn_y": "100",
             "delay_after_click_notify": "0.3",
-            # 滚动相关的延时已移除，因为我们不再滚动
             "delay_after_accept": "0.05",
             "delay_after_confirm": "1.5",
-            "first_run_timestamp": 0,
-            "license_key": ""  # 隐藏的验证码字段
+            "license_key": ""  # 验证码保存字段
         }
         os.makedirs(self.config_dir, exist_ok=True)
 
@@ -91,8 +88,6 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.config_manager = ConfigManager()
-        # 注意：我们将试用期检查移到了点击“开始”时，
-        # 这样用户才有机会打开软件并在隐藏框输入验证码。
 
         self.title("自动接单助手 (极速锁定版)")
         self.geometry("550x760")
@@ -102,9 +97,12 @@ class App(tk.Tk):
         self.is_running = False
         self.show_coords = False
 
-        # 【验证码设置】
+        # 【验证码与试用期设置】
         self.SECRET_CODE = "VIP888"
-        self.TRIAL_DURATION = 604800  # 7天 (7 * 24 * 3600)
+
+        # 设定试用期结束时间：2025年12月5日 00:00:00 (11月28日 + 7天)
+        # 你可以修改这里的年、月、日
+        self.TRIAL_END_DATE = datetime(2025, 12, 5, 0, 0, 0)
 
         self.create_widgets()
         self.load_settings()
@@ -179,8 +177,7 @@ class App(tk.Tk):
         self.stop_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
 
         # 【隐藏的验证码输入框】
-        # 放在最右边，没有标签，看起来像个多余的UI元素
-        self.entries['license_key'] = ttk.Entry(control_frame, width=8, show="*")  # show="*" 掩盖输入
+        self.entries['license_key'] = ttk.Entry(control_frame, width=8, show="*")
         self.entries['license_key'].pack(side=tk.RIGHT, padx=5)
 
         self.status_label = ttk.Label(main_frame, text="状态: 已停止", foreground="red")
@@ -213,8 +210,7 @@ class App(tk.Tk):
 
     def save_settings(self):
         data = {key: entry.get() for key, entry in self.entries.items()}
-        current_config = self.config_manager.load_config()
-        data['first_run_timestamp'] = current_config.get('first_run_timestamp', 0)
+        # 移除旧的时间戳保存逻辑，只保存界面上的数据
         if self.config_manager.save_config(data):
             messagebox.showinfo("成功", "配置已成功保存！")
         else:
@@ -243,39 +239,30 @@ class App(tk.Tk):
 
     def check_license_and_trial(self):
         """检查试用期和验证码"""
-        config = self.config_manager.load_config()
-
-        # 1. 检查验证码是否正确
+        # 1. 优先检查验证码 (如果输入了正确的码，永久解锁)
         user_code = self.entries['license_key'].get()
         if user_code == self.SECRET_CODE:
-            return True  # 验证码正确，直接通过
-
-        # 2. 检查试用期
-        first_run_time = config.get("first_run_timestamp", 0)
-        if first_run_time == 0:
-            # 第一次运行，记录时间
-            config["first_run_timestamp"] = time.time()
-            self.config_manager.save_config(config)
             return True
 
-        current_time = time.time()
-        if current_time - first_run_time > self.TRIAL_DURATION:
-            return False  # 试用期已过且无验证码
+            # 2. 检查固定日期试用期
+        current_time = datetime.now()
+        if current_time < self.TRIAL_END_DATE:
+            return True  # 在试用期截止日期之前，允许使用
 
-        return True  # 试用期内
+        # 3. 既无验证码，又过了试用期
+        return False
 
     def start_automation(self):
-        # 【试用期检查逻辑】
+        # 【试用期检查】
         if not self.check_license_and_trial():
             messagebox.showerror("运行错误", "关键组件初始化失败。 (Error: 0x80070005)")
-            sys.exit()  # 强制退出，模拟崩溃
+            sys.exit()  # 强制退出
 
         self.is_running = True
         self.status_label.config(text="状态: 极速锁定运行中...", foreground="green")
         self.start_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
         try:
-            # 过滤掉非数字的配置项（比如license_key）
             self.current_config = {}
             for key, entry in self.entries.items():
                 if key == 'license_key': continue
@@ -330,7 +317,6 @@ class App(tk.Tk):
         close_x, close_y = int(cfg['close_btn_x']), int(cfg['close_btn_y'])
 
         print("--- 自动化流程已启动 (Top-Edge Locking) ---")
-        print("提示: 采用高位颜色锁定策略")
 
         with mss.mss() as sct:
             previous_img_np = np.array(sct.grab(monitor_area))
@@ -349,31 +335,23 @@ class App(tk.Tk):
                         pyautogui.click(notify_click_x, notify_click_y)
                         time.sleep(cfg['delay_after_click_notify'])
 
-                        # 2. 【核心修改】不滚动，直接进行高位锁定搜索
-                        # 截取垂直长条
+                        # 2. 高位锁定搜索
                         search_img = np.array(sct.grab(search_monitor))
                         search_img_bgr = search_img[:, :, :3]
 
-                        # 颜色匹配
                         diff = np.abs(search_img_bgr - target_color)
                         mask = np.all(diff < tolerance, axis=2)
 
-                        # 获取匹配点的坐标
                         y_indices, x_indices = np.where(mask)
 
                         if len(y_indices) > 0:
-                            # 【关键算法】Top-Edge Locking
-                            # 找到最小的 Y 值 (即最上面的蓝色像素)
+                            # 找到最上面的蓝色像素
                             min_y_offset = np.min(y_indices)
-
-                            # 向下偏移 10 像素，确保点在按钮内部
+                            # 向下偏移 10 像素
                             real_click_y = search_y1 + min_y_offset + 10
-
-                            # print(f"锁定目标! Y={real_click_y}") # 调试用
                             pyautogui.click(accept_x, real_click_y)
                         else:
                             print("未找到目标颜色，尝试点击默认位置...")
-                            # 兜底：如果没有找到颜色，点搜索区域的顶部1/3处
                             fallback_y = search_y1 + (search_y2 - search_y1) * 0.3
                             pyautogui.click(accept_x, fallback_y)
 
