@@ -13,7 +13,6 @@ from datetime import datetime
 import cv2  # 必须安装: pip install opencv-python
 
 # --- 全局极速设置 ---
-# 移除所有安全延迟，实现毫秒级响应
 pyautogui.PAUSE = 0
 pyautogui.FAILSAFE = True
 
@@ -34,18 +33,18 @@ class ConfigManager:
         self.defaults = {
             "monitor_x1": "100", "monitor_y1": "800",
             "monitor_x2": "600", "monitor_y2": "1000",
-            "accept_btn_x": "306",  # 按钮大概的X坐标
-            "search_y1": "700", "search_y2": "1015",  # 覆盖有图和无图的整个Y轴范围
-            "target_r": "46", "target_g": "150", "target_b": "213",  # 按钮颜色
-            "color_tolerance": "30",  # 颜色容差
-            "scan_width": "100",  # 【关键】扫描宽度，设宽一点(100)容错率高
-            "min_btn_height": "20",  # 【关键】最小按钮高度，过滤噪点
+            "accept_btn_x": "306",
+            "search_y1": "700", "search_y2": "1015",
+            "target_r": "46", "target_g": "150", "target_b": "213",
+            "color_tolerance": "30",
+            "scan_width": "100",
+            "min_btn_height": "20",
             "confirm_btn_x": "500", "confirm_btn_y": "550",
             "close_btn_x": "900", "close_btn_y": "100",
             "delay_after_click_notify": "0.3",
             "delay_after_accept": "0.05",
             "delay_after_confirm": "1.5",
-            "license_key": ""  # 隐藏的验证码
+            "license_key": ""
         }
         os.makedirs(self.config_dir, exist_ok=True)
 
@@ -92,7 +91,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.config_manager = ConfigManager()
-        self.title("自动接单助手 (垂直投影终极版)")
+        self.title("自动接单助手 (垂直投影修复版)")
         self.geometry("580x850")
         self.attributes('-topmost', True)
         self.entries = {}
@@ -100,9 +99,7 @@ class App(tk.Tk):
         self.is_running = False
         self.show_coords = False
 
-        # --- 试用期配置 ---
         self.SECRET_CODE = "VIP888"
-        # 试用期截止日期：2025年12月5日
         self.TRIAL_END_DATE = datetime(2025, 12, 5, 0, 0, 0)
 
         self.create_widgets()
@@ -181,7 +178,6 @@ class App(tk.Tk):
         self.stop_btn = ttk.Button(control_frame, text="停止运行", state=tk.DISABLED, command=self.stop_automation)
         self.stop_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
 
-        # 隐藏的验证码输入框
         self.entries['license_key'] = ttk.Entry(control_frame, width=8, show="*")
         self.entries['license_key'].pack(side=tk.RIGHT, padx=5)
 
@@ -241,21 +237,18 @@ class App(tk.Tk):
                 break
 
     def check_license_and_trial(self):
-        """检查试用期和验证码"""
         user_code = self.entries['license_key'].get()
         if user_code == self.SECRET_CODE:
-            return True  # 验证码正确，永久解锁
-
+            return True
         current_time = datetime.now()
         if current_time < self.TRIAL_END_DATE:
-            return True  # 试用期内
-
-        return False  # 过期且无码
+            return True
+        return False
 
     def start_automation(self):
         if not self.check_license_and_trial():
             messagebox.showerror("运行错误", "关键组件初始化失败。 (Error: 0x80070005)")
-            sys.exit()  # 模拟崩溃退出
+            sys.exit()
 
         self.is_running = True
         self.status_label.config(text="状态: 运行中...", foreground="green")
@@ -287,7 +280,6 @@ class App(tk.Tk):
     def _automation_loop(self):
         cfg = self.current_config
 
-        # 监控区域
         monitor_area = {
             "left": int(cfg['monitor_x1']), "top": int(cfg['monitor_y1']),
             "width": int(cfg['monitor_x2'] - cfg['monitor_x1']),
@@ -305,10 +297,9 @@ class App(tk.Tk):
         target_color = np.array([cfg['target_b'], cfg['target_g'], cfg['target_r']])  # BGR
         tolerance = int(cfg['color_tolerance'])
 
-        scan_width = int(cfg.get('scan_width', 100))  # 默认宽100
-        min_btn_height = int(cfg.get('min_btn_height', 20))  # 默认高20
+        scan_width = int(cfg.get('scan_width', 100))
+        min_btn_height = int(cfg.get('min_btn_height', 20))
 
-        # 搜索区域：以 accept_x 为中心，截取一个宽矩形
         search_monitor = {
             "left": int(accept_x - scan_width / 2),
             "top": int(search_y1),
@@ -345,15 +336,16 @@ class App(tk.Tk):
                         # 2. 垂直投影扫描
                         search_img = sct.grab(search_monitor)
                         search_img_np = np.array(search_img)
+
+                        # 【修复点】: 显式切片，只保留BGR 3通道，丢弃Alpha通道
+                        # 这样 debug_img 就是 (H, W, 3) 而不是 (H, W, 4)
                         search_img_bgr = search_img_np[:, :, :3]
 
                         # 计算颜色差异 -> 掩码
                         diff = np.abs(search_img_bgr - target_color)
                         mask = np.all(diff < tolerance, axis=2)
 
-                        # 【核心算法】垂直投影 (Vertical Projection)
-                        # 只要这一行里有任何一个像素是蓝色的，这一行就标记为 True
-                        # 这能有效忽略文字（文字是白的，但旁边是蓝的）
+                        # 垂直投影
                         row_has_blue = np.any(mask, axis=1)
 
                         # 寻找第一个连续的 True 块
@@ -366,27 +358,29 @@ class App(tk.Tk):
                                     current_start = i
                                 consecutive_count += 1
                             else:
-                                # 如果断开了，检查之前的块是否足够高
                                 if consecutive_count >= min_btn_height:
                                     found_y_start = current_start
-                                    break  # 找到了第一个合格的块（接单按钮），立即停止！
+                                    break
                                 consecutive_count = 0
 
-                                # 检查边缘情况
                         if found_y_start == -1 and consecutive_count >= min_btn_height:
                             found_y_start = current_start
 
                         t_scan_end = time.time()
                         # --- 扫描结束 ---
 
-                        # --- 调试图片生成 ---
-                        debug_img = search_img_np.copy()
+                        # --- 调试图片生成 (修复了维度不匹配问题) ---
+                        # 使用已经切片好的 BGR 图像作为底图
+                        debug_img = search_img_bgr.copy()
+
+                        # 将掩码转为可视化的白色 (单通道 -> 3通道)
                         mask_vis = (mask.astype(np.uint8) * 255)
                         mask_vis = cv2.cvtColor(mask_vis, cv2.COLOR_GRAY2BGR)
+
+                        # 现在两个都是 (H, W, 3)，可以完美拼接
                         debug_combined = np.hstack((debug_img, mask_vis))
 
                         if found_y_start != -1:
-                            # 计算点击位置：起始位置向下偏移 15 像素
                             real_click_y = search_y1 + found_y_start + 15
 
                             print(f"锁定成功! 坐标: ({accept_x}, {real_click_y})")
@@ -399,12 +393,11 @@ class App(tk.Tk):
                             pyautogui.click(accept_x, real_click_y)
                         else:
                             print("未找到有效按钮 (已过滤噪点)")
-                            # 兜底
                             fallback_y = search_y1 + (search_y2 - search_y1) * 0.3
                             pyautogui.click(accept_x, fallback_y)
 
-                        # 保存调试图片
-                        mss.tools.to_png(debug_combined, debug_combined.shape[:2][::-1], output="debug_projection.png")
+                        # 使用 cv2 保存图片，更稳定
+                        cv2.imwrite("debug_projection.png", debug_combined)
 
                         time.sleep(cfg['delay_after_accept'])
 
