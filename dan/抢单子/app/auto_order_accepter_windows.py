@@ -8,15 +8,16 @@ import os
 import numpy as np
 import sys
 import mss
-import mss.tools  # 引入工具用于保存调试图片
-from datetime import datetime, timedelta
+import mss.tools
+from datetime import datetime
+import cv2  # 必须安装: pip install opencv-python
 
 # --- 全局极速设置 ---
+# 移除所有安全延迟，实现毫秒级响应
 pyautogui.PAUSE = 0
 pyautogui.FAILSAFE = True
 
 
-# --- 路径函数 ---
 def get_application_path(relative_path):
     if getattr(sys, 'frozen', False):
         application_path = os.path.dirname(sys.executable)
@@ -33,16 +34,18 @@ class ConfigManager:
         self.defaults = {
             "monitor_x1": "100", "monitor_y1": "800",
             "monitor_x2": "600", "monitor_y2": "1000",
-            "accept_btn_x": "220",  # 用户当前的设置
-            "search_y1": "700", "search_y2": "1015",
-            "target_r": "46", "target_g": "150", "target_b": "213",
-            "color_tolerance": "30",  # 稍微调大一点容差
+            "accept_btn_x": "306",  # 按钮大概的X坐标
+            "search_y1": "700", "search_y2": "1015",  # 覆盖有图和无图的整个Y轴范围
+            "target_r": "46", "target_g": "150", "target_b": "213",  # 按钮颜色
+            "color_tolerance": "30",  # 颜色容差
+            "scan_width": "100",  # 【关键】扫描宽度，设宽一点(100)容错率高
+            "min_btn_height": "20",  # 【关键】最小按钮高度，过滤噪点
             "confirm_btn_x": "500", "confirm_btn_y": "550",
             "close_btn_x": "900", "close_btn_y": "100",
             "delay_after_click_notify": "0.3",
             "delay_after_accept": "0.05",
             "delay_after_confirm": "1.5",
-            "license_key": ""
+            "license_key": ""  # 隐藏的验证码
         }
         os.makedirs(self.config_dir, exist_ok=True)
 
@@ -68,7 +71,7 @@ class ConfigManager:
             return False
 
 
-# --- 日志重定向类 ---
+# --- 日志重定向 ---
 class TextRedirector(object):
     def __init__(self, widget):
         self.widget = widget
@@ -84,21 +87,22 @@ class TextRedirector(object):
         pass
 
 
-# --- 主应用 GUI ---
+# --- 主程序 GUI ---
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.config_manager = ConfigManager()
-
-        self.title("自动接单助手 (调试增强版)")
-        self.geometry("580x780")  # 稍微加宽一点显示日志
+        self.title("自动接单助手 (垂直投影终极版)")
+        self.geometry("580x850")
         self.attributes('-topmost', True)
         self.entries = {}
         self.automation_thread = None
         self.is_running = False
         self.show_coords = False
 
+        # --- 试用期配置 ---
         self.SECRET_CODE = "VIP888"
+        # 试用期截止日期：2025年12月5日
         self.TRIAL_END_DATE = datetime(2025, 12, 5, 0, 0, 0)
 
         self.create_widgets()
@@ -114,7 +118,7 @@ class App(tk.Tk):
         self.add_coord_entry(settings_frame, "监控区左上角 (x1, y1):", "monitor_x1", "monitor_y1", 0)
         self.add_coord_entry(settings_frame, "监控区右下角 (x2, y2):", "monitor_x2", "monitor_y2", 1)
 
-        ttk.Label(settings_frame, text="接单按钮X坐标:").grid(row=2, column=0, sticky='w', padx=5, pady=2)
+        ttk.Label(settings_frame, text="接单按钮X坐标(大概):").grid(row=2, column=0, sticky='w', padx=5, pady=2)
         self.entries['accept_btn_x'] = ttk.Entry(settings_frame, width=8)
         self.entries['accept_btn_x'].grid(row=2, column=1, padx=5)
 
@@ -127,30 +131,34 @@ class App(tk.Tk):
         # 颜色设置
         color_frame = ttk.LabelFrame(main_frame, text="接单按钮颜色特征 (RGB)")
         color_frame.pack(fill=tk.X, pady=5)
-
         ttk.Label(color_frame, text="R:").pack(side=tk.LEFT, padx=2)
         self.entries['target_r'] = ttk.Entry(color_frame, width=5)
         self.entries['target_r'].pack(side=tk.LEFT)
-
         ttk.Label(color_frame, text="G:").pack(side=tk.LEFT, padx=2)
         self.entries['target_g'] = ttk.Entry(color_frame, width=5)
         self.entries['target_g'].pack(side=tk.LEFT)
-
         ttk.Label(color_frame, text="B:").pack(side=tk.LEFT, padx=2)
         self.entries['target_b'] = ttk.Entry(color_frame, width=5)
         self.entries['target_b'].pack(side=tk.LEFT)
-
         ttk.Label(color_frame, text="容差:").pack(side=tk.LEFT, padx=5)
         self.entries['color_tolerance'] = ttk.Entry(color_frame, width=5)
         self.entries['color_tolerance'].pack(side=tk.LEFT)
 
+        # 扫描设置
+        scan_frame = ttk.LabelFrame(main_frame, text="扫描容错设置 (垂直投影)")
+        scan_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(scan_frame, text="扫描宽度(像素):").pack(side=tk.LEFT, padx=5)
+        self.entries['scan_width'] = ttk.Entry(scan_frame, width=5)
+        self.entries['scan_width'].pack(side=tk.LEFT)
+        ttk.Label(scan_frame, text="最小按钮高度:").pack(side=tk.LEFT, padx=5)
+        self.entries['min_btn_height'] = ttk.Entry(scan_frame, width=5)
+        self.entries['min_btn_height'].pack(side=tk.LEFT)
+
         # 其他设置
         other_frame = ttk.LabelFrame(main_frame, text="其他坐标与延时")
         other_frame.pack(fill=tk.X, pady=5)
-
         self.add_coord_entry(other_frame, "确认按钮 (x, y):", "confirm_btn_x", "confirm_btn_y", 0)
         self.add_coord_entry(other_frame, "关闭按钮 (x, y):", "close_btn_x", "close_btn_y", 1)
-
         self.add_delay_entry(other_frame, "点击通知后延时:", "delay_after_click_notify", 2)
         self.add_delay_entry(other_frame, "点击接单后延时:", "delay_after_accept", 3)
         self.add_delay_entry(other_frame, "点击确认后延时:", "delay_after_confirm", 4)
@@ -173,12 +181,12 @@ class App(tk.Tk):
         self.stop_btn = ttk.Button(control_frame, text="停止运行", state=tk.DISABLED, command=self.stop_automation)
         self.stop_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
 
+        # 隐藏的验证码输入框
         self.entries['license_key'] = ttk.Entry(control_frame, width=8, show="*")
         self.entries['license_key'].pack(side=tk.RIGHT, padx=5)
 
         self.status_label = ttk.Label(main_frame, text="状态: 已停止", foreground="red")
         self.status_label.pack(pady=2)
-
         log_frame = ttk.LabelFrame(main_frame, text="运行日志")
         log_frame.pack(fill=tk.BOTH, expand=True, pady=5)
         self.log_text = scrolledtext.ScrolledText(log_frame, height=10, wrap=tk.WORD)
@@ -233,18 +241,21 @@ class App(tk.Tk):
                 break
 
     def check_license_and_trial(self):
+        """检查试用期和验证码"""
         user_code = self.entries['license_key'].get()
         if user_code == self.SECRET_CODE:
-            return True
+            return True  # 验证码正确，永久解锁
+
         current_time = datetime.now()
         if current_time < self.TRIAL_END_DATE:
-            return True
-        return False
+            return True  # 试用期内
+
+        return False  # 过期且无码
 
     def start_automation(self):
         if not self.check_license_and_trial():
             messagebox.showerror("运行错误", "关键组件初始化失败。 (Error: 0x80070005)")
-            sys.exit()
+            sys.exit()  # 模拟崩溃退出
 
         self.is_running = True
         self.status_label.config(text="状态: 运行中...", foreground="green")
@@ -275,15 +286,17 @@ class App(tk.Tk):
 
     def _automation_loop(self):
         cfg = self.current_config
+
+        # 监控区域
         monitor_area = {
             "left": int(cfg['monitor_x1']), "top": int(cfg['monitor_y1']),
-            "width": int(cfg['monitor_x2']) - int(cfg['monitor_x1']),
-            "height": int(cfg['monitor_y2']) - int(cfg['monitor_y1'])
+            "width": int(cfg['monitor_x2'] - cfg['monitor_x1']),
+            "height": int(cfg['monitor_y2'] - cfg['monitor_y1'])
         }
         PIXEL_CHANGE_THRESHOLD = 100
 
-        notify_click_x = monitor_area['left'] + monitor_area['width'] / 2
-        notify_click_y = monitor_area['top'] + monitor_area['height'] / 2
+        notify_click_x = cfg['monitor_x1'] + (cfg['monitor_x2'] - cfg['monitor_x1']) / 2
+        notify_click_y = cfg['monitor_y1'] + (cfg['monitor_y2'] - cfg['monitor_y1']) / 2
 
         accept_x = int(cfg['accept_btn_x'])
         search_y1 = int(cfg['search_y1'])
@@ -292,18 +305,22 @@ class App(tk.Tk):
         target_color = np.array([cfg['target_b'], cfg['target_g'], cfg['target_r']])  # BGR
         tolerance = int(cfg['color_tolerance'])
 
-        # 【优化】将搜索宽度增加到 20，防止X轴微小偏差导致切到文字
+        scan_width = int(cfg.get('scan_width', 100))  # 默认宽100
+        min_btn_height = int(cfg.get('min_btn_height', 20))  # 默认高20
+
+        # 搜索区域：以 accept_x 为中心，截取一个宽矩形
         search_monitor = {
-            "left": accept_x - 10,
-            "top": search_y1,
-            "width": 20,
-            "height": search_y2 - search_y1
+            "left": int(accept_x - scan_width / 2),
+            "top": int(search_y1),
+            "width": scan_width,
+            "height": int(search_y2 - search_y1)
         }
 
         confirm_x, confirm_y = int(cfg['confirm_btn_x']), int(cfg['confirm_btn_y'])
         close_x, close_y = int(cfg['close_btn_x']), int(cfg['close_btn_y'])
 
-        print("--- 自动化流程已启动 ---")
+        print("--- 自动化流程已启动 (垂直投影扫描) ---")
+        print(f"试用期截止: {self.TRIAL_END_DATE}")
 
         with mss.mss() as sct:
             previous_img_np = np.array(sct.grab(monitor_area))
@@ -322,47 +339,72 @@ class App(tk.Tk):
                         pyautogui.click(notify_click_x, notify_click_y)
                         time.sleep(cfg['delay_after_click_notify'])
 
-                        # 2. 高位锁定搜索
-                        search_img = sct.grab(search_monitor)  # 获取MSS对象
-                        search_img_np = np.array(search_img)  # 转Numpy
-                        search_img_bgr = search_img_np[:, :, :3]  # 提取BGR
+                        # --- 毫秒级扫描开始 ---
+                        t_scan_start = time.time()
 
+                        # 2. 垂直投影扫描
+                        search_img = sct.grab(search_monitor)
+                        search_img_np = np.array(search_img)
+                        search_img_bgr = search_img_np[:, :, :3]
+
+                        # 计算颜色差异 -> 掩码
                         diff = np.abs(search_img_bgr - target_color)
                         mask = np.all(diff < tolerance, axis=2)
 
-                        y_indices, x_indices = np.where(mask)
+                        # 【核心算法】垂直投影 (Vertical Projection)
+                        # 只要这一行里有任何一个像素是蓝色的，这一行就标记为 True
+                        # 这能有效忽略文字（文字是白的，但旁边是蓝的）
+                        row_has_blue = np.any(mask, axis=1)
 
-                        if len(y_indices) > 0:
-                            min_y_offset = np.min(y_indices)
-                            real_click_y = search_y1 + min_y_offset + 10
+                        # 寻找第一个连续的 True 块
+                        found_y_start = -1
+                        consecutive_count = 0
+
+                        for i, is_blue in enumerate(row_has_blue):
+                            if is_blue:
+                                if consecutive_count == 0:
+                                    current_start = i
+                                consecutive_count += 1
+                            else:
+                                # 如果断开了，检查之前的块是否足够高
+                                if consecutive_count >= min_btn_height:
+                                    found_y_start = current_start
+                                    break  # 找到了第一个合格的块（接单按钮），立即停止！
+                                consecutive_count = 0
+
+                                # 检查边缘情况
+                        if found_y_start == -1 and consecutive_count >= min_btn_height:
+                            found_y_start = current_start
+
+                        t_scan_end = time.time()
+                        # --- 扫描结束 ---
+
+                        # --- 调试图片生成 ---
+                        debug_img = search_img_np.copy()
+                        mask_vis = (mask.astype(np.uint8) * 255)
+                        mask_vis = cv2.cvtColor(mask_vis, cv2.COLOR_GRAY2BGR)
+                        debug_combined = np.hstack((debug_img, mask_vis))
+
+                        if found_y_start != -1:
+                            # 计算点击位置：起始位置向下偏移 15 像素
+                            real_click_y = search_y1 + found_y_start + 15
+
                             print(f"锁定成功! 坐标: ({accept_x}, {real_click_y})")
+                            print(f" >> [扫描耗时] {(t_scan_end - t_scan_start) * 1000:.4f} ms")
+
+                            # 画绿线
+                            cv2.line(debug_combined, (0, found_y_start + 15), (scan_width * 2, found_y_start + 15),
+                                     (0, 255, 0), 2)
+
                             pyautogui.click(accept_x, real_click_y)
                         else:
-                            # 【调试核心】详细分析为什么没找到
-                            print("未找到目标颜色!")
-
-                            # 计算整个区域内最接近的颜色
-                            # 对每个像素求RGB三个通道的平均差异
-                            mean_diff_per_pixel = np.mean(diff, axis=2)
-                            min_diff_val = np.min(mean_diff_per_pixel)
-
-                            # 找到最接近的那个像素的坐标
-                            min_loc = np.unravel_index(np.argmin(mean_diff_per_pixel), mean_diff_per_pixel.shape)
-                            closest_pixel_bgr = search_img_bgr[min_loc[0], min_loc[1]]
-                            closest_pixel_rgb = closest_pixel_bgr[::-1]  # 转回RGB方便阅读
-
-                            print(f" > 区域内最小色差: {min_diff_val:.1f} (阈值: {tolerance})")
-                            print(f" > 最接近的颜色 RGB: {closest_pixel_rgb}")
-                            print(f" > 建议: 检查X轴是否对准，或将容差设为 {int(min_diff_val) + 5}")
-
-                            # 保存调试图片
-                            debug_filename = "debug_error_strip.png"
-                            mss.tools.to_png(search_img.rgb, search_img.size, output=debug_filename)
-                            print(f" > 已保存调试图片: {debug_filename} (请查看是否截到了按钮)")
-
-                            # 兜底点击
+                            print("未找到有效按钮 (已过滤噪点)")
+                            # 兜底
                             fallback_y = search_y1 + (search_y2 - search_y1) * 0.3
                             pyautogui.click(accept_x, fallback_y)
+
+                        # 保存调试图片
+                        mss.tools.to_png(debug_combined, debug_combined.shape[:2][::-1], output="debug_projection.png")
 
                         time.sleep(cfg['delay_after_accept'])
 
@@ -375,7 +417,7 @@ class App(tk.Tk):
                         time.sleep(cfg['delay_after_confirm'])
                         pyautogui.click(close_x, close_y)
 
-                        print(f"[抢单报告] 耗时: {t_end_action - t0:.4f}s")
+                        print(f"[抢单报告] 总耗时: {t_end_action - t0:.4f}s")
                         print("------------------------------------")
 
                         time.sleep(2)
