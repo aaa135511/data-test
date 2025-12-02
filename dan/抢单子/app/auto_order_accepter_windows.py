@@ -41,7 +41,9 @@ class ConfigManager:
             "min_btn_height": "20",
             "confirm_btn_x": "500", "confirm_btn_y": "550",
             "close_btn_x": "900", "close_btn_y": "100",
-            "delay_after_click_notify": "0.3",
+            "delay_after_click_notify": "0.5",
+            "max_wait_time": "3.0",
+            # stability_count 已移除，代码内固定为2
             "delay_after_accept": "0.05",
             "delay_after_confirm": "1.5",
             "license_key": ""
@@ -91,15 +93,17 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.config_manager = ConfigManager()
-        self.title("自动接单助手 (垂直投影修复版)")
-        self.geometry("580x850")
+        self.title("自动接单助手 (双重确认版)")
+        self.geometry("580x880")
         self.attributes('-topmost', True)
         self.entries = {}
         self.automation_thread = None
         self.is_running = False
         self.show_coords = False
 
-        self.SECRET_CODE = "VIP888"
+        # --- 验证码设置 ---
+        # 8位随机生成的特殊字符+英文+数字
+        self.SECRET_CODE = "K9#mP$2v"
         self.TRIAL_END_DATE = datetime(2025, 12, 5, 0, 0, 0)
 
         self.create_widgets()
@@ -156,9 +160,17 @@ class App(tk.Tk):
         other_frame.pack(fill=tk.X, pady=5)
         self.add_coord_entry(other_frame, "确认按钮 (x, y):", "confirm_btn_x", "confirm_btn_y", 0)
         self.add_coord_entry(other_frame, "关闭按钮 (x, y):", "close_btn_x", "close_btn_y", 1)
-        self.add_delay_entry(other_frame, "点击通知后延时:", "delay_after_click_notify", 2)
-        self.add_delay_entry(other_frame, "点击接单后延时:", "delay_after_accept", 3)
-        self.add_delay_entry(other_frame, "点击确认后延时:", "delay_after_confirm", 4)
+
+        ttk.Label(other_frame, text="点击通知后延时(秒):").grid(row=2, column=0, sticky='w', padx=5, pady=2)
+        self.entries['delay_after_click_notify'] = ttk.Entry(other_frame, width=8)
+        self.entries['delay_after_click_notify'].grid(row=2, column=1, padx=5)
+
+        ttk.Label(other_frame, text="最大轮询时间(秒):").grid(row=3, column=0, sticky='w', padx=5, pady=2)
+        self.entries['max_wait_time'] = ttk.Entry(other_frame, width=8)
+        self.entries['max_wait_time'].grid(row=3, column=1, padx=5)
+
+        self.add_delay_entry(other_frame, "点击接单后延时:", "delay_after_accept", 4)
+        self.add_delay_entry(other_frame, "点击确认后延时:", "delay_after_confirm", 5)
 
         # 工具栏
         coords_frame = ttk.LabelFrame(main_frame, text="工具")
@@ -299,6 +311,11 @@ class App(tk.Tk):
 
         scan_width = int(cfg.get('scan_width', 100))
         min_btn_height = int(cfg.get('min_btn_height', 20))
+        max_wait_time = float(cfg.get('max_wait_time', 3.0))
+        delay_after_click_notify = float(cfg.get('delay_after_click_notify', 0.5))
+
+        # 【固定】连续确认次数为2
+        stability_count_threshold = 2
 
         search_monitor = {
             "left": int(accept_x - scan_width / 2),
@@ -310,8 +327,8 @@ class App(tk.Tk):
         confirm_x, confirm_y = int(cfg['confirm_btn_x']), int(cfg['confirm_btn_y'])
         close_x, close_y = int(cfg['close_btn_x']), int(cfg['close_btn_y'])
 
-        print("--- 自动化流程已启动 (垂直投影扫描) ---")
-        print(f"试用期截止: {self.TRIAL_END_DATE}")
+        print("--- 自动化流程已启动 (双重确认版) ---")
+        # 已移除试用期打印
 
         with mss.mss() as sct:
             previous_img_np = np.array(sct.grab(monitor_area))
@@ -328,90 +345,101 @@ class App(tk.Tk):
 
                         # 1. 点击通知
                         pyautogui.click(notify_click_x, notify_click_y)
-                        time.sleep(cfg['delay_after_click_notify'])
 
-                        # --- 毫秒级扫描开始 ---
-                        t_scan_start = time.time()
+                        # 2. 安全延时 (避开上一页)
+                        time.sleep(delay_after_click_notify)
 
-                        # 2. 垂直投影扫描
-                        search_img = sct.grab(search_monitor)
-                        search_img_np = np.array(search_img)
+                        wait_start_time = time.time()
+                        found_btn = False
 
-                        # 【修复点】: 显式切片，只保留BGR 3通道，丢弃Alpha通道
-                        # 这样 debug_img 就是 (H, W, 3) 而不是 (H, W, 4)
-                        search_img_bgr = search_img_np[:, :, :3]
+                        # 状态变量
+                        candidate_y = -1
+                        match_count = 0
 
-                        # 计算颜色差异 -> 掩码
-                        diff = np.abs(search_img_bgr - target_color)
-                        mask = np.all(diff < tolerance, axis=2)
+                        # --- 轮询循环 ---
+                        while (time.time() - wait_start_time) < max_wait_time:
+                            search_img = sct.grab(search_monitor)
+                            search_img_np = np.array(search_img)
+                            search_img_bgr = search_img_np[:, :, :3]
 
-                        # 垂直投影
-                        row_has_blue = np.any(mask, axis=1)
+                            diff = np.abs(search_img_bgr - target_color)
+                            mask = np.all(diff < tolerance, axis=2)
+                            row_has_blue = np.any(mask, axis=1)
 
-                        # 寻找第一个连续的 True 块
-                        found_y_start = -1
-                        consecutive_count = 0
+                            # 寻找当前帧最靠上的蓝色块
+                            current_top_y = -1
+                            consecutive_count = 0
+                            for i, is_blue in enumerate(row_has_blue):
+                                if is_blue:
+                                    if consecutive_count == 0:
+                                        current_start = i
+                                    consecutive_count += 1
+                                else:
+                                    if consecutive_count >= min_btn_height:
+                                        current_top_y = current_start
+                                        break
+                                    consecutive_count = 0
 
-                        for i, is_blue in enumerate(row_has_blue):
-                            if is_blue:
-                                if consecutive_count == 0:
-                                    current_start = i
-                                consecutive_count += 1
-                            else:
-                                if consecutive_count >= min_btn_height:
-                                    found_y_start = current_start
+                            if current_top_y == -1 and consecutive_count >= min_btn_height:
+                                current_top_y = current_start
+
+                            # --- 核心逻辑：双重确认与高位更新 ---
+                            if current_top_y != -1:
+                                if candidate_y == -1:
+                                    # 第一次发现
+                                    candidate_y = current_top_y
+                                    match_count = 1
+                                else:
+                                    # 之前已经发现过，比较位置
+                                    if current_top_y < candidate_y - 10:
+                                        # 发现了一个明显更靠上的按钮 (说明接单按钮刚加载出来)
+                                        # 抛弃旧的(可能是转交)，更新为新的
+                                        candidate_y = current_top_y
+                                        match_count = 1  # 重新计数
+                                    elif abs(current_top_y - candidate_y) <= 10:
+                                        # 位置基本没变，认为是同一个按钮
+                                        match_count += 1
+                                    else:
+                                        # 发现了一个更靠下的按钮？忽略它，坚持原来的高位按钮
+                                        pass
+
+                                # 检查是否达到稳定阈值 (固定为2)
+                                if match_count >= stability_count_threshold:
+                                    real_click_y = search_y1 + candidate_y + 15
+                                    pyautogui.click(accept_x, real_click_y)
+                                    print(f"锁定并点击! 耗时: {(time.time() - wait_start_time) * 1000:.1f} ms")
+                                    found_btn = True
+
+                                    # 保存调试图
+                                    debug_img = search_img_bgr.copy()
+                                    mask_vis = (mask.astype(np.uint8) * 255)
+                                    mask_vis = cv2.cvtColor(mask_vis, cv2.COLOR_GRAY2BGR)
+                                    debug_combined = np.hstack((debug_img, mask_vis))
+                                    cv2.line(debug_combined, (0, candidate_y + 15), (scan_width * 2, candidate_y + 15),
+                                             (0, 255, 0), 2)
+                                    cv2.imwrite("debug_success.png", debug_combined)
+
                                     break
-                                consecutive_count = 0
+                            else:
+                                # 这一帧没找到按钮，重置计数
+                                match_count = 0
 
-                        if found_y_start == -1 and consecutive_count >= min_btn_height:
-                            found_y_start = current_start
+                            # 全速轮询
+                            # time.sleep(0.001)
 
-                        t_scan_end = time.time()
-                        # --- 扫描结束 ---
+                        # --- 轮询结束 ---
 
-                        # --- 调试图片生成 (修复了维度不匹配问题) ---
-                        # 使用已经切片好的 BGR 图像作为底图
-                        debug_img = search_img_bgr.copy()
-
-                        # 将掩码转为可视化的白色 (单通道 -> 3通道)
-                        mask_vis = (mask.astype(np.uint8) * 255)
-                        mask_vis = cv2.cvtColor(mask_vis, cv2.COLOR_GRAY2BGR)
-
-                        # 现在两个都是 (H, W, 3)，可以完美拼接
-                        debug_combined = np.hstack((debug_img, mask_vis))
-
-                        if found_y_start != -1:
-                            real_click_y = search_y1 + found_y_start + 15
-
-                            print(f"锁定成功! 坐标: ({accept_x}, {real_click_y})")
-                            print(f" >> [扫描耗时] {(t_scan_end - t_scan_start) * 1000:.4f} ms")
-
-                            # 画绿线
-                            cv2.line(debug_combined, (0, found_y_start + 15), (scan_width * 2, found_y_start + 15),
-                                     (0, 255, 0), 2)
-
-                            pyautogui.click(accept_x, real_click_y)
+                        if not found_btn:
+                            print(f"超时 ({max_wait_time}s) 未找到按钮。")
                         else:
-                            print("未找到有效按钮 (已过滤噪点)")
-                            fallback_y = search_y1 + (search_y2 - search_y1) * 0.3
-                            pyautogui.click(accept_x, fallback_y)
+                            time.sleep(cfg['delay_after_accept'])
+                            pyautogui.click(confirm_x, confirm_y)
 
-                        # 使用 cv2 保存图片，更稳定
-                        cv2.imwrite("debug_projection.png", debug_combined)
+                            time.sleep(cfg['delay_after_confirm'])
+                            pyautogui.click(close_x, close_y)
 
-                        time.sleep(cfg['delay_after_accept'])
-
-                        # 3. 确认
-                        pyautogui.click(confirm_x, confirm_y)
-
-                        t_end_action = time.time()
-
-                        # 4. 后处理
-                        time.sleep(cfg['delay_after_confirm'])
-                        pyautogui.click(close_x, close_y)
-
-                        print(f"[抢单报告] 总耗时: {t_end_action - t0:.4f}s")
-                        print("------------------------------------")
+                            print(f"[抢单报告] 总流程结束")
+                            print("------------------------------------")
 
                         time.sleep(2)
                         previous_img_np = np.array(sct.grab(monitor_area))
