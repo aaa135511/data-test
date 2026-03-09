@@ -6,7 +6,7 @@ import os
 import re
 
 
-# --- CORE DATA PROCESSING LOGIC (FINAL CORRECTED MELT OPERATION) ---
+# --- CORE DATA PROCESSING LOGIC (WITH NEW OPTIMIZATION) ---
 
 def parse_stock_value(value):
     """
@@ -25,8 +25,8 @@ def parse_stock_value(value):
 
 def process_inventory_files(file_paths, status_callback):
     """
-    Reads four files and updates inventory, using a corrected and precise
-    melt operation on the warehouse details file.
+    Reads four files and updates inventory.
+    OPTIMIZATION: Sets stock to 0 if the SKU cannot be found in the mapping file.
     """
     # +++++ DEBUG TARGET +++++
     DEBUG_TARGET_PART_NUM = "WELL000000SWFZ"
@@ -74,21 +74,17 @@ def process_inventory_files(file_paths, status_callback):
         part_to_item_map = sku_map_df.set_index(INV_PART)[SKU_ITEM_CODE].to_dict()
         supplier_to_wh_map = warehouse_map_df.groupby(INV_ID)[WH_MAP_CODE].apply(list).to_dict()
 
-        # --- CRITICAL FIX: Precisely define which columns are warehouses ---
-        # Identify columns that are NOT warehouse codes
         non_warehouse_cols = [col for col in ['Item Code', '店铺Code', '可售库存'] if
                               col in warehouse_details_df.columns]
-        # Identify columns that ARE warehouse codes by excluding the ones above
         warehouse_cols = [col for col in warehouse_details_df.columns if col not in non_warehouse_cols]
 
         warehouse_details_long = pd.melt(
             warehouse_details_df,
             id_vars=[WH_DETAIL_ITEM_CODE],
-            value_vars=warehouse_cols,  # This is the fix: only melt the actual warehouse columns
+            value_vars=warehouse_cols,
             var_name=WH_MAP_CODE,
             value_name='warehouse_stock_raw'
         )
-        # --------------------------------------------------------------------
 
         warehouse_details_long['new_stock_value'] = warehouse_details_long['warehouse_stock_raw'].apply(
             parse_stock_value)
@@ -103,6 +99,7 @@ def process_inventory_files(file_paths, status_callback):
         for index, row in inventory_df.iterrows():
             part_num = str(row[INV_PART]).strip()
             supplier_id = str(row[INV_ID]).strip()
+            old_stock = row['original_stock']
 
             is_debug_target = (part_num == DEBUG_TARGET_PART_NUM)
             if is_debug_target:
@@ -111,17 +108,42 @@ def process_inventory_files(file_paths, status_callback):
                 print("=" * 50)
 
             item_code = part_to_item_map.get(part_num)
+
+            # --- NEW OPTIMIZATION LOGIC ---
+            if not item_code:
+                # If no Item Code is found, the SKU is unmapped.
+                # Set its stock to 0 if it's not already 0.
+                if old_stock != 0:
+                    inventory_df.at[index, 'new_stock'] = 0
+                    log_entry = (
+                        f"UPDATED (SKU NOT FOUND): Part#={part_num}, SupplierID={supplier_id}\n"
+                        f"         (Set stock to 0. Old Stock={old_stock})"
+                    )
+                    updated_items.append(log_entry)
+                if is_debug_target:
+                    print(f"[DEBUG] 1. Looked up Part# '{part_num}' in sku_map.")
+                    print(f"   -> Found Item Code: None. Setting stock to 0.")
+                    print("=" * 50 + "\n")
+                continue  # Move to the next row
+            # --- END OF OPTIMIZATION ---
+
             if is_debug_target:
                 print(f"[DEBUG] 1. Looked up Part# '{part_num}' in sku_map.")
                 print(f"   -> Found Item Code: {item_code}")
-            if not item_code:
-                continue
 
             possible_wh_codes = supplier_to_wh_map.get(supplier_id)
             if is_debug_target:
                 print(f"[DEBUG] 2. Looked up SupplierID '{supplier_id}' in warehouse_map.")
                 print(f"   -> Found B2B Warehouse Codes: {possible_wh_codes}")
             if not possible_wh_codes:
+                # If a supplier has no warehouses mapped, their stock should also be 0.
+                if old_stock != 0:
+                    inventory_df.at[index, 'new_stock'] = 0
+                    log_entry = (
+                        f"UPDATED (NO WAREHOUSE MAPPED): Part#={part_num}, SupplierID={supplier_id}\n"
+                        f"         (Set stock to 0. Old Stock={old_stock})"
+                    )
+                    updated_items.append(log_entry)
                 continue
 
             found_stocks = []
@@ -147,15 +169,15 @@ def process_inventory_files(file_paths, status_callback):
                 print(f"[DEBUG] 5. Determined max stock value: {final_new_stock}")
                 print("=" * 50 + "\n")
 
-            old_stock = row['original_stock']
             if final_new_stock != old_stock:
                 inventory_df.at[index, 'new_stock'] = final_new_stock
 
                 winning_wh = 'N/A'
-                for wh_code in possible_wh_codes:
-                    if stock_lookup_map.get((item_code, str(wh_code).strip())) == final_new_stock:
-                        winning_wh = wh_code
-                        break
+                if final_new_stock > 0:  # Only find winning warehouse if stock is positive
+                    for wh_code in possible_wh_codes:
+                        if stock_lookup_map.get((item_code, str(wh_code).strip())) == final_new_stock:
+                            winning_wh = wh_code
+                            break
 
                 log_entry = (
                     f"UPDATED: Part#={part_num}, ItemCode={item_code}, SupplierID={supplier_id}\n"
