@@ -33,8 +33,8 @@ class RakutenBotGUI:
     def __init__(self, root):
         self.root = root
         self.instance_id = random.randint(1000, 9999)
-        self.root.title(f"Rakuten RMS 自动竞价系统 v8.0 (带安全上限)[ID: {self.instance_id}]")
-        self.root.geometry("1200x850")  # 加宽窗口以容纳新列
+        self.root.title(f"Rakuten RMS 自动竞价系统 [ID: {self.instance_id}]")
+        self.root.geometry("1100x850")
 
         # 默认账号配置
         self.default_r_user = "suntakuraku0068"
@@ -96,6 +96,18 @@ class RakutenBotGUI:
         btn_stop = tk.Button(group_ctrl, text="停止监控", bg="#ffcdd2", fg="red", height=2, command=self.action_stop)
         btn_stop.grid(row=0, column=2, rowspan=2, padx=5, sticky="nsew")
 
+        # === 新增：刷新间隔设置 ===
+        frame_settings = tk.Frame(group_ctrl)
+        frame_settings.grid(row=2, column=0, columnspan=3, pady=(8, 0), sticky="w")
+
+        tk.Label(frame_settings, text="刷新间隔(秒):", font=("Arial", 9, "bold")).pack(side="left", padx=(5, 2))
+        self.refresh_interval_var = tk.IntVar(value=20)  # 默认20秒
+        sp_refresh = tk.Spinbox(frame_settings, from_=1, to=300, increment=1, textvariable=self.refresh_interval_var,
+                                width=5)
+        sp_refresh.pack(side="left", padx=2)
+        tk.Label(frame_settings, text="（设置越小刷新越快，建议5-20秒）", fg="gray", font=("Arial", 8)).pack(side="left",
+                                                                                                          padx=5)
+
         group_ctrl.grid_columnconfigure(0, weight=1)
         group_ctrl.grid_columnconfigure(1, weight=1)
 
@@ -118,22 +130,16 @@ class RakutenBotGUI:
 
         self.tree.heading("uid", text="ID")
         self.tree.column("uid", width=80, anchor="center")
-
         self.tree.heading("monitor", text="监控")
         self.tree.column("monitor", width=50, anchor="center")
-
         self.tree.heading("current_budget", text="当前月预算")
         self.tree.column("current_budget", width=100, anchor="e")
-
         self.tree.heading("bid_step", text="每次加价(円) ✎")
         self.tree.column("bid_step", width=100, anchor="center")
-
         self.tree.heading("max_limit", text="上限(円) ✎")
         self.tree.column("max_limit", width=100, anchor="center")
-
         self.tree.heading("status", text="实时状态")
         self.tree.column("status", width=100, anchor="center")
-
         self.tree.heading("name", text="Campaign 名称")
         self.tree.column("name", width=500, anchor="w")
 
@@ -173,7 +179,7 @@ class RakutenBotGUI:
         if uid not in self.campaign_map: return
         c_item = self.campaign_map[uid]
 
-        # 切换监控状态
+        # 如果点击的是第2列 (监控)
         if col_id == "#2":
             c_item.monitor = not c_item.monitor
             if c_item.monitor and c_item.status == "已达上限":
@@ -181,7 +187,7 @@ class RakutenBotGUI:
             self.refresh_tree_item(uid)
             self.log(f"商品 {uid} 监控状态切换为: {'是' if c_item.monitor else '否'}")
 
-        # 修改加价金额
+        # 如果点击的是第4列 (加价金额)
         elif col_id == "#4":
             new_step = simpledialog.askinteger("修改加价金额",
                                                f"请输入 [{c_item.name[:10]}...] 的每次加价金额：",
@@ -189,7 +195,7 @@ class RakutenBotGUI:
             if new_step is not None:
                 c_item.bid_step = new_step
                 self.refresh_tree_item(uid)
-                self.log(f"商品 {uid} 加价金额修改为: {new_step} 円")
+                self.log(f"商品 {uid} 加价金额已修改为: {new_step} 円")
 
         # 修改预算上限
         elif col_id == "#5":
@@ -257,7 +263,8 @@ class RakutenBotGUI:
             messagebox.showerror("错误", "列表为空，没有可监控的商品")
             return
 
-        self.log("🚀 启动竞价自动监控 (5秒刷新)...")
+        refresh_time = self.refresh_interval_var.get()
+        self.log(f"🚀 启动竞价自动监控 ({refresh_time}秒刷新)...")
         self.is_running = True
         t = threading.Thread(target=self.thread_bidding_loop)
         t.daemon = True
@@ -276,14 +283,17 @@ class RakutenBotGUI:
             self.driver = webdriver.Chrome(service=service, options=options)
             self.wait_obj = WebDriverWait(self.driver, 30)
 
+            # 1. 登录
             if not self._login_logic():
                 self.is_running = False
                 return
 
+            # 2. 导航至 Campaign
             if not self._navigate_logic():
                 self.is_running = False
                 return
 
+            # 3. 扫描提取
             self._scan_campaigns()
             self.is_running = False
             self.log("✅ 提取完成！请配置参数并点击 [开始竞拍监控]")
@@ -293,50 +303,54 @@ class RakutenBotGUI:
             self.is_running = False
 
     def thread_bidding_loop(self):
-        """核心竞拍监控循环 (含上限保护)"""
+        """核心竞拍监控循环"""
         self.log(">>> [Phase 2] 自动竞价引擎启动 <<<")
 
         loop_count = 0
         while self.is_running:
             loop_count += 1
             try:
+                # 获取最新的刷新间隔设置
+                refresh_sec = self.refresh_interval_var.get()
+                if refresh_sec < 1: refresh_sec = 1  # 兜底防止异常输入
+
+                # 0. 刷新页面
                 self.log(f"--- 第 {loop_count} 轮扫描 ---")
                 self.driver.refresh()
 
+                # 确认页面加载完成
                 try:
                     self.wait_obj.until(EC.presence_of_element_located((By.ID, "budget")))
+                    WebDriverWait(self.driver, 3).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, "tr.table-row")))
                 except TimeoutException:
                     self.log("⚠️ 页面加载超时，跳过本轮")
                     time.sleep(2)
                     continue
 
-                # 寻找铃铛
+                # 1. 寻找是否出现铃铛警报 (精准探测)
                 bell_found = False
                 try:
-                    alerts = self.driver.find_elements(By.XPATH,
-                                                       "//th[@id='budget']//*[contains(translate(@class, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'bell') or contains(translate(@class, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'alert') or contains(translate(@class, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'warning') or contains(translate(@class, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'badge')]")
-                    reds = self.driver.find_elements(By.XPATH,
-                                                     "//th[@id='budget']//*[contains(@style, 'red') or contains(@style, 'rgb(191, 0, 0)') or contains(@fill, 'red') or contains(@color, 'red')]")
-                    svgs = self.driver.find_elements(By.XPATH, "//th[@id='budget']//*[local-name()='svg']")
-                    imgs = self.driver.find_elements(By.XPATH, "//th[@id='budget']//img")
-
-                    if len(alerts) > 0 or len(reds) > 0 or len(imgs) > 0 or len(svgs) > 2:
+                    bells = self.driver.find_elements(By.CSS_SELECTOR, "th#budget .notification-bell")
+                    if len(bells) > 0:
                         bell_found = True
                 except:
                     pass
 
+                # 2. 判断并加价
                 action_taken = False
 
                 if bell_found:
-                    self.log("🔔 检测到预算警报！准备评估加价...")
+                    self.log("🔔 检测到真实的预算警报！准备评估加价...")
 
                     for uid, item in self.campaign_map.items():
                         if not item.monitor: continue
 
                         try:
+                            # 搜索整行的文本以匹配 UID
                             row = self.driver.find_element(By.XPATH,
-                                                           f"//tr[contains(@class, 'table-row')][.//td[2]//span[contains(text(), '{uid}')]]")
-                            budget_input = row.find_element(By.XPATH, "./td[6]//input[@type='text']")
+                                                           f"//tr[contains(@class, 'table-row') and contains(., '{uid}')]")
+                            budget_input = row.find_element(By.XPATH, ".//td[6]//input[@type='text']")
 
                             current_val_str = budget_input.get_attribute("value")
                             current_val = int(re.sub(r'[^\d]', '', current_val_str)) if current_val_str else 0
@@ -347,22 +361,24 @@ class RakutenBotGUI:
                                     self.log(
                                         f"🛑 拦截: [{item.name[:10]}] 当前预算({current_val}) 已达设定的上限({item.max_limit})，系统取消监控。")
                                     item.status = "已达上限"
-                                    item.monitor = False  # 取消监控，不再处理
+                                    item.monitor = False
                                     self.refresh_tree_item(uid)
-                                continue  # 跳过该商品
+                                continue
 
-                            # 计算新预算
+                                # 计算新预算
                             new_budget = current_val + item.bid_step
 
                             # 溢出截断保护
                             if new_budget > item.max_limit:
-                                self.log(
-                                    f"⚠️ 提示: [{item.name[:10]}] 预计金额({new_budget}) 超过上限，强制截断为上限值 ({item.max_limit})")
+                                self.log(f"⚠️ 提示: [{item.name[:10]}] 预计金额超限，强制截断为 {item.max_limit}")
                                 new_budget = item.max_limit
 
                             self.log(f"💰 执行加价: [{item.name[:10]}] {current_val} -> {new_budget}")
 
+                            # 核心交互：清空并输入回车
+                            budget_input.click()  # 先聚焦
                             budget_input.send_keys(Keys.CONTROL + "a")
+                            budget_input.send_keys(Keys.COMMAND + "a")
                             budget_input.send_keys(Keys.BACKSPACE)
                             budget_input.send_keys(str(new_budget))
                             budget_input.send_keys(Keys.RETURN)
@@ -372,35 +388,37 @@ class RakutenBotGUI:
                             self.refresh_tree_item(uid)
                             action_taken = True
 
-                            time.sleep(1)
+                            time.sleep(1)  # 给前端留出保存接口的时间
 
                         except NoSuchElementException:
-                            self.log(f"⚠️ 页面未找到商品ID: {uid}")
+                            self.log(f"⚠️ 页面未找到商品ID: {uid}，可能已被移除或分页")
                         except Exception as e:
                             self.log(f"❌ 修改 {uid} 时报错: {e}")
 
                 else:
-                    self.log("🟢 状态正常，无需操作")
+                    self.log("🟢 状态正常，无铃铛警报")
                     for item in self.campaign_map.values():
                         if item.monitor and item.status == "加价成功":
                             item.status = "监控中"
                             self.refresh_tree_item(item.uid)
 
+                # 3. 自定义等待时间
                 if not action_taken:
-                    time.sleep(5)
+                    time.sleep(refresh_sec)
                 else:
-                    time.sleep(4)
+                    # 如果执行了操作，稍微少等一点时间，但最少等1秒
+                    time.sleep(max(1, refresh_sec - 1))
 
             except Exception as e:
                 self.log(f"⚠️ 监控异常: {e}")
-                time.sleep(5)
+                time.sleep(self.refresh_interval_var.get())
 
         self.log("🛑 竞价监控已退出。")
 
     # --- 辅助逻辑 ---
 
     def _scan_campaigns(self):
-        self.log("正在解析竞拍列表，提取[有効]条目...")
+        self.log("正在解析竞拍列表，仅提取[有効]的条目...")
         self.tree.delete(*self.tree.get_children())
         self.campaign_map.clear()
 
@@ -410,6 +428,7 @@ class RakutenBotGUI:
 
         try:
             self.wait_obj.until(EC.presence_of_element_located((By.ID, "budget")))
+            WebDriverWait(self.driver, 5).until(EC.presence_of_element_located((By.CSS_SELECTOR, "tr.table-row")))
             time.sleep(1)
 
             rows = self.driver.find_elements(By.CSS_SELECTOR, "tr.table-row")
