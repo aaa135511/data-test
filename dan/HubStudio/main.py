@@ -77,13 +77,26 @@ class TaskThread(QThread):
     def log(self, msg):
         self.log_signal.emit(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
+    def safe_click(self, driver, element):
+        """增强型点击：原生点击失败后尝试 JS 强制点击"""
+        try:
+            element.click()
+        except:
+            driver.execute_script("arguments[0].click();", element)
+
     def run(self):
         stop_reason = "任务正常结束"
+        driver = None
         try:
             self.log(f"🚀 正在启动 HubStudio 环境: {self.config['env_id']}...")
             start_url = f"http://127.0.0.1:{self.config['api_port']}/api/v1/browser/start?containerCode={self.config['env_id']}"
-            res = requests.get(start_url).json()
-            if res.get("code") != 0: raise Exception(res.get("msg"))
+
+            try:
+                res = requests.get(start_url).json()
+                if res.get("code") != 0: raise Exception(res.get("msg"))
+            except Exception as e:
+                self.log(f"❌ 启动失败: {e}")
+                return
 
             data = res.get("data")
             port = data.get("debuggingPort") or data.get("debugAddr").split(':')[-1]
@@ -93,13 +106,14 @@ class TaskThread(QThread):
             options.add_experimental_option("debuggerAddress", debug_addr)
             service = Service(ChromeDriverManager(driver_version="142.0.7444.168").install())
             driver = webdriver.Chrome(service=service, options=options)
-            wait = WebDriverWait(driver, 15)
+            wait = WebDriverWait(driver, 20)
 
             self.log("🌐 正在进入 WhatsApp Web...")
             driver.get("https://web.whatsapp.com")
             wait.until(EC.presence_of_element_located((By.XPATH, '//span[@data-icon="new-chat-outline"]')))
             self.log("✅ 登录验证通过")
 
+            # 读取 Excel
             df = pd.read_excel(self.config['file_path'])
             df.columns = [str(c).strip().lower().replace(" ", "") for c in df.columns]
             if '是否完成' not in df.columns:
@@ -112,39 +126,46 @@ class TaskThread(QThread):
                     self.log(f"📑 第 {index + 1} 行已完成，跳过。")
                     continue
 
-                remark = str(row.get('备注', ''))
-                website = str(row.get('网站', ''))
+                remark = str(row.get('备注', '')) if pd.notna(row.get('备注')) else ""
+                website = str(row.get('网站', '')) if pd.notna(row.get('网站')) else ""
                 p1 = self.clean_phone(row.get('whatsapp1'))
                 p2 = self.clean_phone(row.get('whatsapp2'))
                 phones = [p for p in [p1, p2] if p]
 
-                self.log(f"📑 开始处理第 {index + 1} 行: {phones}")
+                self.log(f"📑 处理第 {index + 1} 行: {phones}")
                 row_success = False
 
                 for phone in phones:
                     if not self.is_running: break
-
-                    self.log(f"📍 正在尝试号码: {phone}")
+                    self.log(f"📍 尝试号码: {phone}")
                     try:
                         result = self.process_single_phone(driver, wait, phone, remark, website)
                         if result == "SUCCESS":
                             self.log(f"✨ 成功添加: {phone}")
                             row_success = True
                         elif result == "SKIP":
-                            self.log(f"⚠️ 跳过号码: {phone} (已存在或未注册)")
+                            self.log(f"⚠️ 跳过号码: {phone}")
 
                         delay = random.randint(self.config['d_min'], self.config['d_max'])
+                        self.log(f"⏱️ 休息 {delay} 秒...")
                         time.sleep(delay)
                     except Exception as e:
-                        self.log(f"❌ 号码处理发生未知错误，任务停止: {str(e)[:50]}")
-                        raise e
+                        self.log(f"❌ 本条号码处理异常: {str(e)[:50]}")
+                        # 遇到拦截错误，强制刷新页面重置
+                        if "intercepted" in str(e):
+                            self.log("🔄 发现界面拦截，正在刷新页面...")
+                            driver.refresh()
+                            time.sleep(10)
+                            wait.until(
+                                EC.presence_of_element_located((By.XPATH, '//span[@data-icon="new-chat-outline"]')))
 
                 df.at[index, '是否完成'] = "是" if row_success else "否"
                 df.to_excel(self.config['file_path'], index=False)
 
             self.log("🏁 任务处理完成")
+
         except Exception as e:
-            stop_reason = f"程序异常中断: {str(e)[:50]}"
+            stop_reason = f"程序异常中断: {str(e)}"
         finally:
             self.finished_signal.emit(stop_reason)
 
@@ -152,58 +173,81 @@ class TaskThread(QThread):
         if pd.isna(val): return None
         s = str(val).strip()
         if s.endswith('.0'): s = s[:-2]
-        return "".join(filter(str.isdigit, s))
+        cleaned = "".join(filter(str.isdigit, s))
+        return cleaned if cleaned else None
 
     def process_single_phone(self, driver, wait, phone, name, surname):
-        # 完整的独立流程，确保每次都从干净的界面开始
         try:
             # 1. 强制回到主界面
             self.reset_to_main(driver)
 
-            # 2. 打开添加面板
-            wait.until(EC.element_to_be_clickable((By.XPATH, '//span[@data-icon="new-chat-outline"]'))).click()
+            # 2. 点击加号按钮
+            new_chat_icon = wait.until(EC.element_to_be_clickable((By.XPATH, '//span[@data-icon="new-chat-outline"]')))
+            self.safe_click(driver, new_chat_icon)
+
+            # 3. 点击“添加联系人”
             add_xp = '//span[contains(text(), "添加联系人")]'
-            wait.until(EC.element_to_be_clickable((By.XPATH, add_xp))).click()
+            add_btn = wait.until(EC.element_to_be_clickable((By.XPATH, add_xp)))
+            self.safe_click(driver, add_btn)
 
-            # 3. 填写所有信息
-            wait.until(EC.presence_of_element_located((By.XPATH, '//div[@contenteditable="true"]')))
-            fields = driver.find_elements(By.XPATH, '//div[@contenteditable="true"]')
-            fields[0].send_keys(name);
-            fields[1].send_keys(surname)
-
-            cc_btn_xp = '//div[text()="国家/地区"]/..//div[@role="button"]'
-            wait.until(EC.element_to_be_clickable((By.XPATH, cc_btn_xp))).click()
+            # 4. 填写姓名
+            wait.until(EC.presence_of_all_elements_located((By.XPATH, '//div[@contenteditable="true"]')))
             time.sleep(1)
-            search_xp = '//div[@role="textbox" and @contenteditable="true"]'
-            wait.until(EC.presence_of_element_located((By.XPATH, search_xp))).send_keys(self.config['c_code'])
-            time.sleep(1.5)
-            aus_xp = f'//button[contains(@aria-label, "{self.config["c_name"]}")]'
-            wait.until(EC.element_to_be_clickable((By.XPATH, aus_xp))).click()
+            fields = driver.find_elements(By.XPATH, '//div[@contenteditable="true"]')
+            if len(fields) >= 2:
+                fields[0].send_keys(name)
+                fields[1].send_keys(surname)
+            else:
+                raise Exception("无法定位姓名输入框")
 
+            # 5. 选择国家
+            cc_btn_xp = '//div[text()="国家/地区"]/..//div[@role="button"]'
+            cc_btn = wait.until(EC.element_to_be_clickable((By.XPATH, cc_btn_xp)))
+            self.safe_click(driver, cc_btn)
+
+            time.sleep(0.8)
+            search_xp = '//div[@role="textbox" and @contenteditable="true"]'
+            search_input = wait.until(EC.presence_of_element_located((By.XPATH, search_xp)))
+            search_input.send_keys(self.config['c_code'])
+            time.sleep(1.5)
+
+            aus_xp = f'//button[contains(@aria-label, "{self.config["c_name"]}")]'
+            aus_item = wait.until(EC.element_to_be_clickable((By.XPATH, aus_xp)))
+            self.safe_click(driver, aus_item)
+
+            # 6. 填号码
             p_xp = '//input[@aria-label="电话号码"]'
             p_input = wait.until(EC.presence_of_element_located((By.XPATH, p_xp)))
             p_input.send_keys(phone)
 
             time.sleep(5)
 
-            # 4. 判断结果
+            # 7. 判断结果
             src = driver.page_source
-            skip_kw = ["已在你的联系人中", "没有注册", "not on WhatsApp", "邀请对方"]
+            skip_kw = ["已在你的联系人中", "已经在通讯录", "没有注册", "not on WhatsApp", "邀请对方"]
             if any(k in src for k in skip_kw):
                 return "SKIP"
             else:
                 submit_xp = '//div[@role="button" and @aria-label="保存联系人"]'
-                wait.until(EC.element_to_be_clickable((By.XPATH, submit_xp))).click()
-                time.sleep(2)  # 等待保存动画
-                return "SUCCESS"
+                try:
+                    submit_btn = wait.until(EC.element_to_be_clickable((By.XPATH, submit_xp)))
+                    self.safe_click(driver, submit_btn)
+                    time.sleep(2)
+                    return "SUCCESS"
+                except:
+                    return "SKIP"
         finally:
             self.reset_to_main(driver)
 
     def reset_to_main(self, driver):
+        """使用 JS 点击和原生点击结合，确保退回到主页"""
         try:
-            back_btn = driver.find_element(By.XPATH, '//span[@data-icon="back-refreshed"]')
-            back_btn.click()
-            time.sleep(1)
+            back_xp = '//span[@data-icon="back-refreshed"]'
+            for _ in range(3):
+                back_btns = driver.find_elements(By.XPATH, back_xp)
+                if not back_btns: break
+                self.safe_click(driver, back_btns[0])
+                time.sleep(1)
         except:
             pass
 
@@ -219,7 +263,7 @@ class MainWindow(QMainWindow):
         self.init_ui()
 
     def init_ui(self):
-        self.setWindowTitle("WhatsApp 智能营销助手 V6.5")
+        self.setWindowTitle("WhatsApp 智能营销助手 V6.8")
         self.resize(1100, 750)
 
         font_family = "Arial" if platform.system() == "Darwin" else "Consolas"
@@ -230,6 +274,7 @@ class MainWindow(QMainWindow):
             QPushButton:disabled {{ background-color: #bdc3c7; }}
             QLineEdit {{ border: 1px solid #ced4da; border-radius: 4px; padding: 8px; }}
             QTextEdit {{ background: #262d31; color: #d1d7db; font-family: '{font_family}'; border-radius: 6px; padding: 10px; }}
+            QTabWidget::pane {{ border: 1px solid #dfe1e5; background: white; }}
         """)
 
         self.tabs = QTabWidget();
@@ -254,7 +299,7 @@ class MainWindow(QMainWindow):
         self.p_in.setEchoMode(QLineEdit.EchoMode.Password)
         btn = QPushButton("开启系统");
         btn.clicked.connect(self.handle_login)
-        v.addWidget(QLabel("<h2 style='color:#075e54;'>WhatsApp Pro</h2>"), alignment=Qt.AlignmentFlag.AlignCenter)
+        v.addWidget(QLabel("<h2 style='color:#075e54; text-align:center;'>WhatsApp Pro</h2>"))
         v.addWidget(self.u_in);
         v.addWidget(self.p_in);
         v.addWidget(btn)
@@ -303,7 +348,6 @@ class MainWindow(QMainWindow):
         self.stop_btn = QPushButton("⏹ 强制停止任务");
         self.stop_btn.setEnabled(False);
         self.stop_btn.clicked.connect(self.force_stop)
-
         export_btn = QPushButton("💾 导出结果 Excel");
         export_btn.clicked.connect(self.export_excel)
 
@@ -325,19 +369,17 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.log_v)
 
     def select_excel(self):
-        path, _ = QFileDialog.getOpenFileName(self, "选择Excel文件", "", "*.xlsx")
+        path, _ = QFileDialog.getOpenFileName(self, "选择Excel", "", "*.xlsx")
         if path: self.excel_path = path; self.f_label.setText(os.path.basename(path))
 
     def start_task(self):
         if not hasattr(self, 'excel_path'): return QMessageBox.warning(self, "提示", "请先上传 Excel")
-
         config = {
             'env_id': self.c_env.text(), 'api_port': self.c_port.text(),
             'c_name': self.c_name.text(), 'c_code': self.c_code.text(),
             'd_min': self.s_min.value(), 'd_max': self.s_max.value(),
             'file_path': self.excel_path
         }
-
         self.run_btn.setEnabled(False);
         self.stop_btn.setEnabled(True)
         self.worker = TaskThread(config)
@@ -349,7 +391,6 @@ class MainWindow(QMainWindow):
         if self.worker:
             self.worker.stop()
             self.log_v.append("<b style='color:red;'>[系统] 正在请求停止...</b>")
-            self.stop_btn.setEnabled(False)
 
     def on_task_finished(self, reason):
         self.run_btn.setEnabled(True);
@@ -357,7 +398,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "任务状态", f"任务已结束\n原因: {reason}")
 
     def export_excel(self):
-        if not hasattr(self, 'excel_path'): return QMessageBox.warning(self, "提示", "请先运行一次任务以生成结果")
+        if not hasattr(self, 'excel_path'): return
         path, _ = QFileDialog.getSaveFileName(self, "导出结果", "", "*.xlsx")
         if path:
             try:
@@ -369,10 +410,9 @@ class MainWindow(QMainWindow):
 
     def setup_admin_ui(self):
         layout = QVBoxLayout(self.admin_w)
-
         admin_pwd_box = QHBoxLayout()
         self.new_adm_p = QLineEdit();
-        self.new_adm_p.setPlaceholderText("请输入管理员新密码")
+        self.new_adm_p.setPlaceholderText("管理员新密码")
         ap_btn = QPushButton("修改并重启");
         ap_btn.clicked.connect(self.update_admin_pwd)
         admin_pwd_box.addWidget(self.new_adm_p);
@@ -397,7 +437,7 @@ class MainWindow(QMainWindow):
         add_box.addWidget(ab)
 
         layout.addWidget(QLabel("<h3>管理员安全设置</h3>"))
-        layout.addLayout(admin_pwd_box)
+        layout.addLayout(admin_pwd_box);
         layout.addSpacing(10)
         layout.addWidget(QLabel("<h3>账户授权列表</h3>"))
         layout.addWidget(self.table);
@@ -410,7 +450,7 @@ class MainWindow(QMainWindow):
         ph = hashlib.sha256(new_p.encode()).hexdigest()
         self.db.cursor.execute("UPDATE users SET password=? WHERE username='admin'", (ph,))
         self.db.conn.commit()
-        QMessageBox.information(self, "成功", "修改成功，请重新登录")
+        QMessageBox.information(self, "成功", "请重新登录")
         sys.exit(0)
 
     def add_user(self):
