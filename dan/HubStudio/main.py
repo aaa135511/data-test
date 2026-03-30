@@ -28,20 +28,29 @@ from selenium.webdriver.common.keys import Keys
 from webdriver_manager.chrome import ChromeDriverManager
 
 
-# ================= 1. 机器码获取 =================
+# ================= 1. 机器码获取 (增强兼容性) =================
 
 def get_machine_code():
+    """获取跨平台唯一机器码 - 优先使用系统UUID解决Win10识别问题"""
     try:
         if platform.system() == "Windows":
-            cmd = "wmic baseboard get serialnumber"
+            # 使用 csproduct uuid 比 baseboard serialnumber 在Win10上更稳定
+            cmd = "wmic csproduct get uuid"
             res = subprocess.check_output(cmd, shell=True, stderr=subprocess.DEVNULL).decode()
-            return res.split('\n')[1].strip()
+            code = res.split('\n')[1].strip()
+            # 如果获取到的是无效字符串，尝试备用方案
+            if not code or "Default" in code or "O.E.M" in code:
+                cmd = "wmic baseboard get serialnumber"
+                res = subprocess.check_output(cmd, shell=True, stderr=subprocess.DEVNULL).decode()
+                code = res.split('\n')[1].strip()
+            return code.upper()
         else:  # MacOS
             cmd = "ioreg -l | grep IOPlatformSerialNumber"
             res = subprocess.check_output(cmd, shell=True, stderr=subprocess.DEVNULL).decode()
-            return res.split('"')[-2]
+            return res.split('"')[-2].upper()
     except:
-        return hashlib.md5(str(uuid.getnode()).encode()).hexdigest()[:16].upper()
+        # 最终保底方案：使用网卡物理地址的哈希
+        return hashlib.md5(str(uuid.getnode()).encode()).hexdigest()[:20].upper()
 
 
 # ================= 2. 数据库管理 =================
@@ -56,7 +65,8 @@ class DBManager:
         self.cursor.execute('''CREATE TABLE IF NOT EXISTS users 
                             (username TEXT PRIMARY KEY, password TEXT, hwid TEXT, is_admin INTEGER)''')
         admin_pwd = hashlib.sha256("whatsappadmin_5566".encode()).hexdigest()
-        self.cursor.execute("INSERT OR IGNORE INTO users VALUES (?, ?, ?, ?)", ("admin", admin_pwd, "", 1))
+        self.cursor.execute("INSERT OR IGNORE INTO users VALUES (?, ?, ?, ?)",
+                            ("admin", admin_pwd, "", 1))
         self.conn.commit()
 
 
@@ -78,7 +88,6 @@ class TaskThread(QThread):
         self.log_signal.emit(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
     def safe_click(self, driver, element):
-        """增强型点击：原生点击失败后尝试 JS 强制点击"""
         try:
             element.click()
         except:
@@ -113,7 +122,6 @@ class TaskThread(QThread):
             wait.until(EC.presence_of_element_located((By.XPATH, '//span[@data-icon="new-chat-outline"]')))
             self.log("✅ 登录验证通过")
 
-            # 读取 Excel
             df = pd.read_excel(self.config['file_path'])
             df.columns = [str(c).strip().lower().replace(" ", "") for c in df.columns]
             if '是否完成' not in df.columns:
@@ -151,7 +159,6 @@ class TaskThread(QThread):
                         time.sleep(delay)
                     except Exception as e:
                         self.log(f"❌ 本条号码处理异常: {str(e)[:50]}")
-                        # 遇到拦截错误，强制刷新页面重置
                         if "intercepted" in str(e):
                             self.log("🔄 发现界面拦截，正在刷新页面...")
                             driver.refresh()
@@ -178,19 +185,14 @@ class TaskThread(QThread):
 
     def process_single_phone(self, driver, wait, phone, name, surname):
         try:
-            # 1. 强制回到主界面
             self.reset_to_main(driver)
-
-            # 2. 点击加号按钮
             new_chat_icon = wait.until(EC.element_to_be_clickable((By.XPATH, '//span[@data-icon="new-chat-outline"]')))
             self.safe_click(driver, new_chat_icon)
 
-            # 3. 点击“添加联系人”
             add_xp = '//span[contains(text(), "添加联系人")]'
             add_btn = wait.until(EC.element_to_be_clickable((By.XPATH, add_xp)))
             self.safe_click(driver, add_btn)
 
-            # 4. 填写姓名
             wait.until(EC.presence_of_all_elements_located((By.XPATH, '//div[@contenteditable="true"]')))
             time.sleep(1)
             fields = driver.find_elements(By.XPATH, '//div[@contenteditable="true"]')
@@ -200,7 +202,6 @@ class TaskThread(QThread):
             else:
                 raise Exception("无法定位姓名输入框")
 
-            # 5. 选择国家
             cc_btn_xp = '//div[text()="国家/地区"]/..//div[@role="button"]'
             cc_btn = wait.until(EC.element_to_be_clickable((By.XPATH, cc_btn_xp)))
             self.safe_click(driver, cc_btn)
@@ -215,14 +216,12 @@ class TaskThread(QThread):
             aus_item = wait.until(EC.element_to_be_clickable((By.XPATH, aus_xp)))
             self.safe_click(driver, aus_item)
 
-            # 6. 填号码
             p_xp = '//input[@aria-label="电话号码"]'
             p_input = wait.until(EC.presence_of_element_located((By.XPATH, p_xp)))
             p_input.send_keys(phone)
 
             time.sleep(5)
 
-            # 7. 判断结果
             src = driver.page_source
             skip_kw = ["已在你的联系人中", "已经在通讯录", "没有注册", "not on WhatsApp", "邀请对方"]
             if any(k in src for k in skip_kw):
@@ -240,7 +239,6 @@ class TaskThread(QThread):
             self.reset_to_main(driver)
 
     def reset_to_main(self, driver):
-        """使用 JS 点击和原生点击结合，确保退回到主页"""
         try:
             back_xp = '//span[@data-icon="back-refreshed"]'
             for _ in range(3):
@@ -263,7 +261,7 @@ class MainWindow(QMainWindow):
         self.init_ui()
 
     def init_ui(self):
-        self.setWindowTitle("WhatsApp 智能营销助手 V6.8")
+        self.setWindowTitle("WhatsApp 智能助手")
         self.resize(1100, 750)
 
         font_family = "Arial" if platform.system() == "Darwin" else "Consolas"
@@ -299,7 +297,8 @@ class MainWindow(QMainWindow):
         self.p_in.setEchoMode(QLineEdit.EchoMode.Password)
         btn = QPushButton("开启系统");
         btn.clicked.connect(self.handle_login)
-        v.addWidget(QLabel("<h2 style='color:#075e54; text-align:center;'>WhatsApp Pro</h2>"))
+        v.addWidget(QLabel("<h2 style='color:#075e54; text-align:center;'>WhatsApp Pro</h2>"),
+                    alignment=Qt.AlignmentFlag.AlignCenter)
         v.addWidget(self.u_in);
         v.addWidget(self.p_in);
         v.addWidget(btn)
@@ -312,9 +311,15 @@ class MainWindow(QMainWindow):
         self.db.cursor.execute("SELECT hwid, is_admin FROM users WHERE username=? AND password=?", (u, ph))
         res = self.db.cursor.fetchone()
         if res:
-            hw, admin = res
-            if not admin and hw and hw != self.hwid: return QMessageBox.critical(self, "鉴权失败", "机器码不匹配！")
-            self.current_user = u
+            db_hwid, admin = res
+            # --- 权限逻辑修复：严格校验普通账户机器码 ---
+            if not admin:
+                if not db_hwid or db_hwid.strip() == "":
+                    return QMessageBox.critical(self, "鉴权失败", "该账户尚未绑定机器码，请联系管理员授权！")
+                if db_hwid.strip().upper() != self.hwid.strip().upper():
+                    return QMessageBox.critical(self, "鉴权失败",
+                                                f"机器码不匹配！\n授权码: {db_hwid}\n本机码: {self.hwid}")
+
             self.tabs.addTab(self.task_w, "自动化加人");
             if admin: self.tabs.addTab(self.admin_w, "管理后台")
             self.tabs.setCurrentIndex(1);
@@ -327,7 +332,6 @@ class MainWindow(QMainWindow):
         left = QWidget();
         left.setFixedWidth(320);
         form = QFormLayout(left)
-
         self.c_env = QLineEdit("1514886159");
         self.c_port = QLineEdit("6873")
         self.c_name = QLineEdit("澳大利亚");
@@ -338,11 +342,9 @@ class MainWindow(QMainWindow):
         self.s_max = QSpinBox();
         self.s_max.setRange(1, 100);
         self.s_max.setValue(20)
-
         f_btn = QPushButton("📂 上传联系人 Excel");
         f_btn.clicked.connect(self.select_excel)
         self.f_label = QLabel("未载入表格")
-
         self.run_btn = QPushButton("▶ 启动批量任务");
         self.run_btn.clicked.connect(self.start_task)
         self.stop_btn = QPushButton("⏹ 强制停止任务");
@@ -350,7 +352,6 @@ class MainWindow(QMainWindow):
         self.stop_btn.clicked.connect(self.force_stop)
         export_btn = QPushButton("💾 导出结果 Excel");
         export_btn.clicked.connect(self.export_excel)
-
         form.addRow("环境 ID:", self.c_env);
         form.addRow("API 端口:", self.c_port)
         form.addRow("国家名称:", self.c_name);
@@ -362,7 +363,6 @@ class MainWindow(QMainWindow):
         form.addRow(self.run_btn);
         form.addRow(self.stop_btn);
         form.addRow(export_btn)
-
         self.log_v = QTextEdit();
         self.log_v.setReadOnly(True)
         layout.addWidget(left);
@@ -374,12 +374,9 @@ class MainWindow(QMainWindow):
 
     def start_task(self):
         if not hasattr(self, 'excel_path'): return QMessageBox.warning(self, "提示", "请先上传 Excel")
-        config = {
-            'env_id': self.c_env.text(), 'api_port': self.c_port.text(),
-            'c_name': self.c_name.text(), 'c_code': self.c_code.text(),
-            'd_min': self.s_min.value(), 'd_max': self.s_max.value(),
-            'file_path': self.excel_path
-        }
+        config = {'env_id': self.c_env.text(), 'api_port': self.c_port.text(), 'c_name': self.c_name.text(),
+                  'c_code': self.c_code.text(), 'd_min': self.s_min.value(), 'd_max': self.s_max.value(),
+                  'file_path': self.excel_path}
         self.run_btn.setEnabled(False);
         self.stop_btn.setEnabled(True)
         self.worker = TaskThread(config)
@@ -417,11 +414,9 @@ class MainWindow(QMainWindow):
         ap_btn.clicked.connect(self.update_admin_pwd)
         admin_pwd_box.addWidget(self.new_adm_p);
         admin_pwd_box.addWidget(ap_btn)
-
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["用户账号", "授权机器码", "操作"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-
         add_box = QHBoxLayout()
         self.nu = QLineEdit();
         self.nu.setPlaceholderText("新账号")
@@ -435,7 +430,6 @@ class MainWindow(QMainWindow):
         add_box.addWidget(self.np);
         add_box.addWidget(self.nh);
         add_box.addWidget(ab)
-
         layout.addWidget(QLabel("<h3>管理员安全设置</h3>"))
         layout.addLayout(admin_pwd_box);
         layout.addSpacing(10)
@@ -450,11 +444,11 @@ class MainWindow(QMainWindow):
         ph = hashlib.sha256(new_p.encode()).hexdigest()
         self.db.cursor.execute("UPDATE users SET password=? WHERE username='admin'", (ph,))
         self.db.conn.commit()
-        QMessageBox.information(self, "成功", "请重新登录")
+        QMessageBox.information(self, "成功", "请重新登录");
         sys.exit(0)
 
     def add_user(self):
-        u, p, h = self.nu.text(), self.np.text(), self.nh.text()
+        u, p, h = self.nu.text().strip(), self.np.text().strip(), self.nh.text().strip().upper()
         if u and p:
             ph = hashlib.sha256(p.encode()).hexdigest()
             self.db.cursor.execute("INSERT OR REPLACE INTO users VALUES (?, ?, ?, 0)", (u, ph, h))
@@ -482,6 +476,6 @@ class MainWindow(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    window = MainWindow()
+    window = MainWindow();
     window.show()
     sys.exit(app.exec())
