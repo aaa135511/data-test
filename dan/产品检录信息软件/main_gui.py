@@ -9,18 +9,68 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLineEdit, QPushButton, QTreeWidget, QTreeWidgetItem, QLabel,
     QFileDialog, QScrollArea, QFrame, QSplitter, QProgressBar, QMessageBox,
-    QTextEdit, QGridLayout, QCheckBox, QDialog
+    QTextEdit, QGridLayout, QCheckBox, QDialog, QStackedWidget
 )
-from PyQt6.QtGui import QPixmap, QColor, QFont, QCursor, QImage
+from PyQt6.QtGui import QPixmap, QColor, QFont, QCursor
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from openpyxl import load_workbook
 from lxml import etree
 
-# --- 试用期限 ---
-EXPIRY_DATE = datetime(2026, 4, 7)
+# --- 全局配置 ---
 DB_PATH = "products_pro_v3.db"
+MARKUP_FACTOR = 1.2  # 普通用户价格倍数
 
 
+# --- 登录对话框 ---
+class LoginDialog(QDialog):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("系统登录 - 产品检录管理系统")
+        self.setFixedSize(350, 220)
+        self.role = None
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(30, 20, 30, 20)
+        layout.setSpacing(15)
+
+        title = QLabel("欢迎登录")
+        title.setFont(QFont("Microsoft YaHei", 14, QFont.Weight.Bold))
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+
+        self.user_input = QLineEdit()
+        self.user_input.setPlaceholderText("账号")
+        layout.addWidget(self.user_input)
+
+        self.pwd_input = QLineEdit()
+        self.pwd_input.setPlaceholderText("密码")
+        self.pwd_input.setEchoMode(QLineEdit.EchoMode.Password)
+        layout.addWidget(self.pwd_input)
+
+        self.login_btn = QPushButton("立即登录")
+        self.login_btn.setFixedHeight(35)
+        self.login_btn.setStyleSheet("background-color: #1890ff; color: white; font-weight: bold; border-radius: 4px;")
+        self.login_btn.clicked.connect(self.check_login)
+        layout.addWidget(self.login_btn)
+
+    def check_login(self):
+        u = self.user_input.text().strip()
+        p = self.pwd_input.text().strip()
+
+        # 账号密码设定
+        if u == "admin" and p == "admin_123666888":
+            self.role = "admin"
+            self.accept()
+        elif u == "user" and p == "user_123333":
+            self.role = "user"
+            self.accept()
+        else:
+            QMessageBox.warning(self, "登录失败", "账号或密码错误，请重试。")
+
+
+# --- 数据库管理 ---
 class DatabaseManager:
     def __init__(self, db_path=DB_PATH):
         self.db_path = db_path
@@ -62,61 +112,25 @@ class DatabaseManager:
         return res
 
 
-# --- 深度优化：无损高清查看器 ---
+# --- 高清原图预览 ---
 class BigImageViewer(QDialog):
-    def __init__(self, image_blob, product_name, parent=None):
+    def __init__(self, image_blob, p_name, parent=None):
         super().__init__(parent)
-        self.setWindowTitle(f"高清原图 - {product_name}")
-        self.resize(1100, 850)
+        self.setWindowTitle(f"高清原图: {p_name}")
+        self.resize(1000, 800)
         layout = QVBoxLayout(self)
-
-        # 提示文字
-        tip = QLabel("💡 提示：当前显示为原图尺寸。若图片过大，请拖动滚动条查看细节。")
-        tip.setStyleSheet("color: #666; font-size: 12px; margin-bottom: 5px;")
-        layout.addWidget(tip)
-
-        # 滚动区域
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setStyleSheet("background-color: #333; border: 1px solid #111;")
-
+        scroll = QScrollArea()
         self.img_label = QLabel()
         self.img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        # 加载图片原始数据
         pix = QPixmap()
         pix.loadFromData(image_blob)
-
-        # 核心逻辑：如果图片分辨率大于屏幕，支持滚动查看原图；否则居中显示
-        self.img_label.setPixmap(pix)
-        self.img_label.adjustSize()  # 关键：根据原图调整标签大小
-
-        self.scroll.setWidget(self.img_label)
-        layout.addWidget(self.scroll)
-
-        # 底部操作
-        btns = QHBoxLayout()
-        fit_btn = QPushButton("适应窗口高度")
-        fit_btn.clicked.connect(lambda: self.scale_to_fit(pix))
-        orig_btn = QPushButton("查看 1:1 原始大小")
-        orig_btn.clicked.connect(lambda: self.show_original(pix))
-        btns.addWidget(fit_btn)
-        btns.addWidget(orig_btn)
-        btns.addStretch()
-        layout.addLayout(btns)
-
-    def scale_to_fit(self, pix):
-        scaled = pix.scaled(self.scroll.width() - 30, self.scroll.height() - 30,
-                            Qt.AspectRatioMode.KeepAspectRatio,
-                            Qt.TransformationMode.SmoothTransformation)
-        self.img_label.setPixmap(scaled)
-
-    def show_original(self, pix):
         self.img_label.setPixmap(pix)
         self.img_label.adjustSize()
+        scroll.setWidget(self.img_label)
+        layout.addWidget(scroll)
 
 
-# --- 核心导入线程 (保持 100% 匹配 + 无损提取) ---
+# --- 导入线程 ---
 class ImportThread(QThread):
     progress = pyqtSignal(int)
     log = pyqtSignal(str)
@@ -129,114 +143,73 @@ class ImportThread(QThread):
 
     def run(self):
         try:
-            self.log.emit("🔍 正在扫描 Excel 内部原图库...")
-            # 1. 深度 ZIP 扫描：提取嵌入式原图
+            self.log.emit("🔍 正在启动深度解析引擎...")
+            # 1. 提取 WPS 嵌入式图片
             wps_map = self.extract_wps_images(self.file_path)
-            self.log.emit(f"📷 提取到无损嵌入资源: {len(wps_map)}个")
-
-            # 2. 备用扫描：提取浮动图片坐标
-            wb_images = load_workbook(self.file_path, data_only=True)
-            ws_images = wb_images.active
+            # 2. 提取标准浮动图片
+            wb_img = load_workbook(self.file_path, data_only=True)
+            ws_img = wb_img.active
             anchor_map = {}
-            if hasattr(ws_images, '_images'):
-                for img in ws_images._images:
+            if hasattr(ws_img, '_images'):
+                for img in ws_img._images:
                     try:
                         row = img.anchor._from.row + 1
-                        anchor_map[row] = img._data()  # 这里拿到的也是原始字节流
+                        anchor_map[row] = img._data()
                     except:
                         continue
 
-            # 3. 开启公式模式读取数据
+            # 3. 读取数据
             wb_data = load_workbook(self.file_path, data_only=False)
             ws_data = wb_data.active
             rows = list(ws_data.iter_rows(min_row=2))
 
-            # 4. 货号查重
-            db_mgr = DatabaseManager()
-            db_skus = set(r['sku'] for r in db_mgr.execute_query("SELECT sku FROM products"))
-            excel_skus = set()
-
-            # 5. 正式录入
             conn = sqlite3.connect(DB_PATH);
             cursor = conn.cursor()
-            imported_count = 0
+            count = 0
+            for i, row in enumerate(rows):
+                sku = str(row[4].value).strip() if row[4].value else None
+                if not sku: continue
 
-            for i, row_cells in enumerate(rows):
-                sku_val = row_cells[4].value
-                sku = str(sku_val).strip() if sku_val else None
-                if not sku or sku in excel_skus or sku in db_skus:
-                    continue
-                excel_skus.add(sku)
+                price_val = str(row[8].value) if row[8].value is not None else ""
+                if "DISPIMG" in price_val: price_val = "0"
 
-                # 价格位移修复
-                price_cell = row_cells[8].value
-                price = str(price_cell) if price_cell is not None else ""
-                if "DISPIMG" in price: price = "0"
+                cursor.execute('''INSERT INTO products (brand, model, name, oe_no, sku, desc_zh, desc_en, price, link, size, inventory, records, supplier)
+                                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                               (row[0].value, row[1].value, row[2].value, row[3].value, sku, row[5].value, row[6].value,
+                                price_val, row[9].value, row[10].value, row[12].value, row[13].value, row[14].value))
 
-                cursor.execute('''
-                    INSERT INTO products (brand, model, name, oe_no, sku, desc_zh, desc_en, price, link, size, inventory, records, supplier)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (row_cells[0].value, row_cells[1].value, row_cells[2].value, row_cells[3].value, sku,
-                      row_cells[5].value, row_cells[6].value, price, row_cells[9].value, row_cells[10].value,
-                      row_cells[12].value, row_cells[13].value, row_cells[14].value))
-
-                product_id = cursor.lastrowid
-
-                # --- 多重图片匹配逻辑 ---
-                img_blob = None
-                row_num = i + 2
-
-                # A: 查找 DISPIMG 公式绑定
-                for cell in row_cells:
-                    val = str(cell.value) if cell.value else ""
-                    if "DISPIMG" in val:
-                        match = re.search(r'DISPIMG\("(.+?)"', val)
-                        if match and match.group(1) in wps_map:
-                            img_blob = wps_map[match.group(1)]
+                pid = cursor.lastrowid
+                blob = None
+                for cell in row:
+                    if cell.value and "DISPIMG" in str(cell.value):
+                        mid = re.search(r'DISPIMG\("(.+?)"', str(cell.value))
+                        if mid and mid.group(1) in wps_map:
+                            blob = wps_map[mid.group(1)];
                             break
-
-                # B: 坐标备用匹配
-                if not img_blob and row_num in anchor_map:
-                    img_blob = anchor_map[row_num]
-
-                if img_blob:
+                if not blob and (i + 2) in anchor_map: blob = anchor_map[i + 2]
+                if blob:
                     cursor.execute("INSERT INTO product_images (product_id, image_blob) VALUES (?, ?)",
-                                   (product_id, sqlite3.Binary(img_blob)))
-
-                imported_count += 1
+                                   (pid, sqlite3.Binary(blob)))
+                count += 1
                 if i % 10 == 0: self.progress.emit(int((i + 1) / len(rows) * 100))
-
             conn.commit();
             conn.close()
-            self.finished.emit(imported_count)
+            self.finished.emit(count)
         except Exception as e:
-            self.error.emit(f"❌ 错误: {str(e)}")
+            self.error.emit(f"❌ 导入失败: {str(e)}")
 
     def extract_wps_images(self, path):
-        """核心：解析 XML 提取无损图片映射"""
         img_map = {}
         try:
             with zipfile.ZipFile(path, 'r') as z:
-                # 解析 rid 和 路径
-                rels_path = 'xl/_rels/cellimages.xml.rels'
-                if rels_path not in z.namelist(): return {}
-                rel_root = etree.fromstring(z.read(rels_path))
-                rid_to_path = {r.get('Id'): r.get('Target') for r in rel_root.xpath('//*[local-name()="Relationship"]')}
-
-                # 解析 ID 和 rid
-                xml_path = 'xl/cellimages.xml'
-                if xml_path not in z.namelist(): return {}
-                xml_root = etree.fromstring(z.read(xml_path))
-
-                for entry in xml_root.xpath('//*[local-name()="cellImage"]'):
-                    try:
-                        name_id = entry.xpath('.//*[local-name()="cNvPr"]/@name')[0]
-                        rid = entry.xpath('.//*[local-name()="blip"]/@*[local-name()="embed"]')[0]
-                        full_path = f"xl/{rid_to_path[rid]}"
-                        if full_path in z.namelist():
-                            img_map[name_id] = z.read(full_path)  # 存储最原始的二进制流
-                    except:
-                        continue
+                rels = etree.fromstring(z.read('xl/_rels/cellimages.xml.rels'))
+                rid_to_path = {r.get('Id'): r.get('Target') for r in rels.xpath('//*[local-name()="Relationship"]')}
+                xml = etree.fromstring(z.read('xl/cellimages.xml'))
+                for entry in xml.xpath('//*[local-name()="cellImage"]'):
+                    nid = entry.xpath('.//*[local-name()="cNvPr"]/@name')[0]
+                    rid = entry.xpath('.//*[local-name()="blip"]/@*[local-name()="embed"]')[0]
+                    p = f"xl/{rid_to_path[rid]}"
+                    if p in z.namelist(): img_map[nid] = z.read(p)
         except:
             pass
         return img_map
@@ -244,53 +217,71 @@ class ImportThread(QThread):
 
 # --- 主界面 ---
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, role):
         super().__init__()
         self.db = DatabaseManager()
+        self.user_role = role  # "admin" or "user"
         self.current_product_id = None
         self.current_blobs = []
         self.init_ui()
 
     def init_ui(self):
-        self.setWindowTitle("产品库 Pro (试用版)")
+        self.setWindowTitle(f"产品检录管理系统 Pro - 正式版 [{'管理员' if self.user_role == 'admin' else '普通用户'}]")
         self.resize(1450, 950)
         self.setStyleSheet("""
-            QMainWindow { background-color: #f2f2f2; }
+            QMainWindow { background-color: #f0f2f5; }
             QLineEdit, QTextEdit { border: 1px solid #ccc; border-radius: 2px; padding: 5px; background: white; }
             QPushButton#SaveBtn { background-color: #1890ff; color: white; font-weight: bold; }
             QPushButton#DelBtn { background-color: #ff4d4f; color: white; }
+            QLineEdit:disabled, QTextEdit:disabled { background-color: #f5f5f5; color: #8c8c8c; }
         """)
 
         central = QWidget();
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
 
-        # 顶部工具
+        # 顶部工具栏
         top = QHBoxLayout()
         self.search_in = QLineEdit();
-        self.search_in.setPlaceholderText("🔍 全文搜索：品名、货号、车型、描述...")
+        self.search_in.setPlaceholderText("🔍 全文搜索：名称、货号、OE、描述...")
         self.search_in.textChanged.connect(self.do_search)
         top.addWidget(self.search_in, 6)
 
-        for t, f, o in [("新增", self.add_new, ""), ("保存修改", self.save_data, "SaveBtn"),
-                        ("删除", self.del_data, "DelBtn"), ("批量导入", self.imp_data, ""),
-                        ("导出勾选", self.exp_data, "")]:
-            b = QPushButton(t);
-            b.clicked.connect(f);
-            b.setFixedSize(90, 35)
-            if o: b.setObjectName(o)
-            top.addWidget(b)
-        main_layout.addLayout(top)
+        # 权限控制按钮
+        self.btn_add = QPushButton("新增");
+        self.btn_add.clicked.connect(self.add_new)
+        self.btn_save = QPushButton("保存修改");
+        self.btn_save.setObjectName("SaveBtn");
+        self.btn_save.clicked.connect(self.save_data)
+        self.btn_del = QPushButton("删除");
+        self.btn_del.setObjectName("DelBtn");
+        self.btn_del.clicked.connect(self.del_data)
+        self.btn_imp = QPushButton("批量导入");
+        self.btn_imp.clicked.connect(self.imp_data)
+        self.btn_exp = QPushButton("导出勾选");
+        self.btn_exp.clicked.connect(self.exp_data)
 
+        for b in [self.btn_add, self.btn_save, self.btn_del, self.btn_imp, self.btn_exp]:
+            b.setFixedSize(90, 35)
+            top.addWidget(b)
+
+        # 普通用户禁用管理按钮
+        if self.user_role == "user":
+            self.btn_add.setEnabled(False);
+            self.btn_save.setEnabled(False)
+            self.btn_del.setEnabled(False);
+            self.btn_imp.setEnabled(False)
+
+        main_layout.addLayout(top)
         self.pbar = QProgressBar();
         self.pbar.setFixedHeight(4);
         self.pbar.hide();
         main_layout.addWidget(self.pbar)
 
-        # 布局
+        # 分割布局
         splitter = QSplitter(Qt.Orientation.Horizontal)
         self.tree = QTreeWidget();
-        self.tree.setHeaderLabels(["产品目录结构"]);
+        self.tree.setHeaderLabels(["产品目录 (勾选导出)"]);
         self.tree.itemClicked.connect(self.on_tree_click)
         self.tree.itemChanged.connect(self.on_tree_changed)
         splitter.addWidget(self.tree)
@@ -300,7 +291,7 @@ class MainWindow(QMainWindow):
         self.scroll.setWidgetResizable(True)
         self.edit_container = QWidget();
         self.grid = QGridLayout(self.edit_container)
-        self.setup_edit_fields();
+        self.setup_edit_fields()
         self.scroll.setWidget(self.edit_container)
 
         self.log_area = QTextEdit();
@@ -315,7 +306,7 @@ class MainWindow(QMainWindow):
         self.do_search()
 
     def setup_edit_fields(self):
-        # 预览图
+        # 图片区
         self.img_label = QLabel("🖼️ 预览图");
         self.img_label.setFixedSize(240, 240);
         self.img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -327,7 +318,7 @@ class MainWindow(QMainWindow):
         self.btn_gallery.clicked.connect(self.open_gallery)
         self.grid.addWidget(self.btn_gallery, 4, 0, 1, 2)
 
-        # 字段排列
+        # 核心信息
         self.edit_brand = QLineEdit();
         self.edit_model = QLineEdit();
         self.edit_name = QLineEdit()
@@ -343,7 +334,7 @@ class MainWindow(QMainWindow):
         self.grid.addWidget(self.edit_model, 0, 5)
         self.grid.addWidget(QLabel("产品名称:"), 1, 2);
         self.grid.addWidget(self.edit_name, 1, 3, 1, 3)
-        self.grid.addWidget(QLabel("产品价格:"), 2, 2);
+        self.grid.addWidget(QLabel("报价价格:"), 2, 2);
         self.grid.addWidget(self.edit_price, 2, 3)
         self.grid.addWidget(QLabel("库存数量:"), 2, 4);
         self.grid.addWidget(self.edit_inv, 2, 5)
@@ -367,21 +358,27 @@ class MainWindow(QMainWindow):
         self.edit_sup = QLineEdit()
         self.grid.addWidget(QLabel("尺寸重量:"), 7, 0);
         self.grid.addWidget(self.edit_specs, 7, 1, 1, 2)
-        self.grid.addWidget(QLabel("供应商:"), 7, 3);
+        self.grid.addWidget(QLabel("供应商信息:"), 7, 3);
         self.grid.addWidget(self.edit_sup, 7, 4, 1, 2)
+
         self.edit_rec = QTextEdit();
         self.edit_rec.setFixedHeight(80)
         self.grid.addWidget(QLabel("🔹 出货记录"), 8, 0, 1, 6);
         self.grid.addWidget(self.edit_rec, 9, 1, 1, 5)
+
+        # 普通用户只读模式
+        if self.user_role == "user":
+            for w in [self.edit_brand, self.edit_model, self.edit_name, self.edit_price, self.edit_inv,
+                      self.edit_sku, self.edit_oe, self.edit_link, self.edit_zh, self.edit_en,
+                      self.edit_specs, self.edit_sup, self.edit_rec]:
+                w.setEnabled(False)
 
     def write_log(self, text):
         self.log_area.append(f"[{datetime.now().strftime('%H:%M:%S')}] {text}")
 
     def show_big_image(self, event):
         if self.current_blobs:
-            # 传递品名，用于窗口标题
-            p_name = self.edit_name.text() or "未命名"
-            BigImageViewer(self.current_blobs[0], p_name, self).exec()
+            BigImageViewer(self.current_blobs[0], self.edit_name.text(), self).exec()
 
     def do_search(self):
         txt = self.search_in.text().strip()
@@ -400,10 +397,9 @@ class MainWindow(QMainWindow):
         d_map = {}
         for r in data:
             b, m = r['brand'] or "未分类", r['model'] or "通用"
-            display_name = f"{r['name'] or '未命名'} ({r['sku']})"
             if b not in d_map: d_map[b] = {}
             if m not in d_map[b]: d_map[b][m] = []
-            d_map[b][m].append((display_name, r['id']))
+            d_map[b][m].append((f"{r['name']} ({r['sku']})", r['id']))
         for b in sorted(d_map.keys()):
             bi = QTreeWidgetItem(self.tree, [b]);
             bi.setCheckState(0, Qt.CheckState.Unchecked);
@@ -442,38 +438,57 @@ class MainWindow(QMainWindow):
         if not res: return
         p = res[0];
         self.current_product_id = pid
-        self.edit_brand.setText(p['brand'] or "");
-        self.edit_model.setText(p['model'] or "");
-        self.edit_name.setText(p['name'] or "")
-        self.edit_sku.setText(p['sku'] or "");
-        self.edit_price.setText(p['price'] or "");
-        self.edit_zh.setText(p['desc_zh'] or "")
-        self.edit_en.setText(p['desc_en'] or "");
-        self.edit_specs.setText(p['size'] or "");
-        self.edit_sup.setText(p['supplier'] or "")
-        self.edit_inv.setText(p['inventory'] or "");
-        self.edit_rec.setText(p['records'] or "");
-        self.edit_oe.setText(p['oe_no'] or "");
-        self.edit_link.setText(p['link'] or "")
 
+        # 基础信息展示
+        self.edit_brand.setText(p['brand'] or "")
+        self.edit_model.setText(p['model'] or "")
+        self.edit_name.setText(p['name'] or "")
+        self.edit_sku.setText(p['sku'] or "")
+        self.edit_oe.setText(p['oe_no'] or "")
+        self.edit_zh.setText(p['desc_zh'] or "")
+        self.edit_en.setText(p['desc_en'] or "")
+        self.edit_specs.setText(p['size'] or "")
+        self.edit_inv.setText(p['inventory'] or "")
+
+        # --- 权限敏感字段处理 ---
+        if self.user_role == "admin":
+            self.edit_price.setText(p['price'] or "")
+            self.edit_sup.setText(p['supplier'] or "")
+            self.edit_rec.setText(p['records'] or "")
+            self.edit_link.setText(p['link'] or "")
+        else:
+            # 价格加成逻辑
+            try:
+                base_price = float(p['price'])
+                markup_price = round(base_price * MARKUP_FACTOR, 2)
+                self.edit_price.setText(str(markup_price))
+            except:
+                self.edit_price.setText(p['price'] or "面议")
+
+            # 掩码掩盖
+            self.edit_sup.setText("****** (无查看权限)")
+            self.edit_rec.setText("****** (无查看权限)")
+            self.edit_link.setText("******")
+
+        # 图片加载
         imgs = self.db.execute_query("SELECT image_blob FROM product_images WHERE product_id=?", (pid,))
         self.current_blobs = [r['image_blob'] for r in imgs]
         self.btn_gallery.setText(f"📂 多图管理 ({len(self.current_blobs)})")
         if self.current_blobs:
             px = QPixmap();
             px.loadFromData(self.current_blobs[0])
-            # 高品质预览渲染
             self.img_label.setPixmap(
                 px.scaled(235, 235, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
         else:
             self.img_label.setText("🖼️ 暂无图片")
 
     def save_data(self):
+        if self.user_role != "admin": return
         if not self.edit_name.text().strip(): return QMessageBox.warning(self, "！", "名称必填")
         d = (self.edit_brand.text(), self.edit_model.text(), self.edit_name.text(), self.edit_oe.text(),
-             self.edit_sku.text(), self.edit_zh.toPlainText(), self.edit_en.toPlainText(), self.edit_price.text(),
-             self.edit_link.text(), self.edit_specs.text(), self.edit_inv.text(), self.edit_rec.toPlainText(),
-             self.edit_sup.text())
+             self.edit_sku.text(),
+             self.edit_zh.toPlainText(), self.edit_en.toPlainText(), self.edit_price.text(), self.edit_link.text(),
+             self.edit_specs.text(), self.edit_inv.text(), self.edit_rec.toPlainText(), self.edit_sup.text())
         if self.current_product_id:
             self.db.execute_query(
                 "UPDATE products SET brand=?,model=?,name=?,oe_no=?,sku=?,desc_zh=?,desc_en=?,price=?,link=?,size=?,inventory=?,records=?,supplier=? WHERE id=?",
@@ -487,7 +502,7 @@ class MainWindow(QMainWindow):
         self.db.execute_query("DELETE FROM product_images WHERE product_id=?", (pid,))
         for b in self.current_blobs: self.db.execute_query(
             "INSERT INTO product_images(product_id,image_blob) VALUES(?,?)", (pid, sqlite3.Binary(b)))
-        self.write_log(f"✅ 已更新：{self.edit_name.text()}内容");
+        self.write_log(f"✅ 保存成功：{self.edit_name.text()}内容");
         self.do_search()
 
     def imp_data(self):
@@ -499,8 +514,8 @@ class MainWindow(QMainWindow):
             self.task.progress.connect(self.pbar.setValue);
             self.task.log.connect(self.write_log)
             self.task.error.connect(lambda m: (self.pbar.hide(), QMessageBox.critical(self, "失败", m)))
-            self.task.finished.connect(
-                lambda n: (self.pbar.hide(), self.do_search(), QMessageBox.information(self, "完成", f"录入{n}条。")))
+            self.task.finished.connect(lambda n: (
+            self.pbar.hide(), self.do_search(), QMessageBox.information(self, "完成", f"录入{n}条记录。")))
             self.task.start()
 
     def exp_data(self):
@@ -525,14 +540,13 @@ class MainWindow(QMainWindow):
                 tuple(ids))
             for r in rows: ws.append(list(r))
             wb.save(p);
-            self.write_log("📤 导出成功")
+            self.write_log("📤 导出完成")
 
     def add_new(self):
         self.current_product_id = None;
         self.current_blobs = []
         for w in self.edit_container.findChildren((QLineEdit, QTextEdit)): w.clear()
-        self.img_label.setText("🖼️ 预览图");
-        self.btn_gallery.setText("📂 多图管理 (0)")
+        self.img_label.setText("🖼️ 预览图")
 
     def del_data(self):
         if self.current_product_id and QMessageBox.question(self, "?",
@@ -542,10 +556,11 @@ class MainWindow(QMainWindow):
             self.do_search()
 
     def open_gallery(self):
+        if self.user_role != "admin": return QMessageBox.information(self, "提示", "普通用户不可编辑图库")
         dlg = ImageGalleryDialog([{'image_blob': b} for b in self.current_blobs], self)
         if dlg.exec():
             self.current_blobs = dlg.all_blobs;
-            self.btn_gallery.setText(f"📂 多图管理 ({len(self.current_blobs)})")
+            self.btn_gallery.setText(f"📂 图片库管理 ({len(self.current_blobs)})")
             if self.current_blobs:
                 px = QPixmap();
                 px.loadFromData(self.current_blobs[0])
@@ -556,11 +571,11 @@ class MainWindow(QMainWindow):
 class ImageGalleryDialog(QDialog):
     def __init__(self, images, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("产品图库");
+        self.setWindowTitle("多图库");
         self.resize(700, 500)
         self.all_blobs = [img['image_blob'] for img in images] if images else []
         layout = QVBoxLayout(self)
-        btn = QPushButton("➕ 添加");
+        btn = QPushButton("➕ 添加图");
         btn.clicked.connect(self.add);
         layout.addWidget(btn)
         self.scroll = QScrollArea();
@@ -569,7 +584,7 @@ class ImageGalleryDialog(QDialog):
         self.scroll.setWidgetResizable(True);
         self.scroll.setWidget(self.container);
         layout.addWidget(self.scroll)
-        b2 = QPushButton("确认应用");
+        b2 = QPushButton("确认");
         b2.clicked.connect(self.accept);
         layout.addWidget(b2)
         self.refresh()
@@ -590,7 +605,7 @@ class ImageGalleryDialog(QDialog):
             px.loadFromData(b);
             l.setPixmap(
                 px.scaled(150, 150, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-            db = QPushButton("移除");
+            db = QPushButton("删");
             db.clicked.connect(lambda ch, idx=i: (self.all_blobs.pop(idx), self.refresh()))
             v = QVBoxLayout();
             v.addWidget(l);
@@ -601,12 +616,14 @@ class ImageGalleryDialog(QDialog):
 
 
 if __name__ == "__main__":
-    if datetime.now() > EXPIRY_DATE:
-        app = QApplication(sys.argv);
-        QMessageBox.critical(None, "过期", "版本到期");
+    app = QApplication(sys.argv)
+    app.setStyle("Fusion")
+
+    # 启动登录流程
+    login = LoginDialog()
+    if login.exec() == QDialog.DialogCode.Accepted:
+        window = MainWindow(login.role)
+        window.show()
+        sys.exit(app.exec())
+    else:
         sys.exit(0)
-    app = QApplication(sys.argv);
-    app.setStyle("Fusion");
-    window = MainWindow();
-    window.show();
-    sys.exit(app.exec())
