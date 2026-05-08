@@ -1,24 +1,35 @@
 //+------------------------------------------------------------------+
-//|                                         DoubleDragon_Ultimate.mq5|
-//|                                  核心任务：突破200点/3分钟止损/日损300 |
+//|                                         DoubleDragon_Pro_V3.mq5  |
+//|                                  核心：突破200/OCO/3分钟/追踪止盈/日损300 |
 //+------------------------------------------------------------------+
 #property copyright "Expert"
 #property link      "https://m.jrjr.com/"
-#property version   "1.02"
+#property version   "3.00"
 #property strict
 
 #include <Trade\Trade.mqh>
 
-//--- 输入参数
-input double LotSize        = 0.2;       // 优化：默认0.2手
-input int    DistancePoints = 200;       // 挂单距离 (200点=2.00美元)
-input int    TakeProfitPts  = 30;        // 止盈点数 (30点=0.3美元)
-input double PriceMin       = 4000.0;    // 交易区间底价
-input double PriceMax       = 6000.0;    // 交易区间顶价
-input double DailyMaxLoss   = 300.0;     // 核心任务4：日亏损限制 (美元)
-input int    TimeLimitMin   = 3;         // 核心任务3：持仓时间限制 (分钟)
-input int    MagicNumber    = 888888;    // EA识别码
-input int    Slippage       = 10;        // 优化：滑点0.1美元=10点
+//--- 基础参数
+input double LotSize         = 0.2;       // 交易手数
+input int    Slippage        = 10;        // 滑点 (10点 = 0.1美元)
+input int    MagicNumber     = 888888;    // EA识别码
+input double DailyMaxLoss    = 300.0;     // 核心任务4：日亏损关机 (美元)
+
+//--- 交易区间与时间
+input double PriceMin        = 4000.0;    // 交易区间底价
+input double PriceMax        = 6000.0;    // 交易区间顶价
+input int    StartHourBJ     = 14;        // 北京时间开始 (下午14点)
+input int    EndHourBJ       = 6;         // 北京时间结束 (次日凌晨6点)
+input int    GMTOffset       = 5;         // 服务器时间比北京时间慢几个小时 (通常选5或6)
+
+//--- 进场参数
+input int    DistancePoints  = 200;       // 挂单距离 (200点 = 2.0美元)
+
+//--- 移动止损/追踪止盈参数 (关键优化)
+input int    InitialStopLoss = 500;       // 初始最大止损 (500点 = 5美元)
+input int    TrailingStart   = 300;       // 获利多少点激活追踪 (300点 = 3美元)
+input int    TrailingStop    = 100;       // 追踪回撤距离 (100点 = 1美元)
+input int    TimeLimitMin    = 3;         // 核心任务3：持仓时间限制 (分钟)
 
 //--- 全局变量
 CTrade trade;
@@ -36,8 +47,7 @@ int OnInit()
     DayStartTime = iTime(_Symbol, PERIOD_D1, 0);
     InitialBalance = AccountInfoDouble(ACCOUNT_BALANCE);
 
-    Print("--- EA 已启动 ---");
-    Print("当前设置：手数=", LotSize, " 滑点=", Slippage, " 日损限制=", DailyMaxLoss);
+    Print("--- EA Pro V3 已启动 ---");
     return(INIT_SUCCEEDED);
 }
 
@@ -46,23 +56,48 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnTick()
 {
-    // 1. 核心任务4：日损熔断检查
+    // 1. 核心任务4：日损检查
     if(!CheckDailyLoss()) return;
 
-    // 2. 价格区间检查
-    double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-    if(currentPrice < PriceMin || currentPrice > PriceMax)
+    // 2. 时间过滤：检查是否在欧美盘活跃时段
+    if(!IsTradeTime())
     {
-        // 如果价格超出区间，清理所有挂单，等待价格回归
+        // 不在交易时间，如果有挂单就撤销，但保留已有持仓（等待止损止盈）
         CancelAllOrders();
         return;
     }
 
-    // 3. 核心任务3：持仓管理（3分钟止损 & 保本）
-    HandlePositions();
+    // 3. 价格区间检查
+    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    if(bid < PriceMin || bid > PriceMax) return;
 
-    // 4. 核心任务1 & 2：挂单逻辑 (包含自动刷新逻辑，防止挂单跑远)
+    // 4. 核心任务3 & 动态管理：时间止损 + 移动止损/追踪止盈
+    HandlePositionsAndTrailing();
+
+    // 5. 核心任务1 & 2：突破挂单逻辑 (OCO)
     ManageOrders();
+}
+
+//+------------------------------------------------------------------+
+//| 时间逻辑：北京时间转服务器时间                                      |
+//+------------------------------------------------------------------+
+bool IsTradeTime()
+{
+    MqlDateTime dt;
+    TimeCurrent(dt);
+
+    // 将当前服务器小时转换为北京时间进行判断
+    int currentBJHour = (dt.hour + GMTOffset) % 24;
+
+    if(StartHourBJ > EndHourBJ) // 跨天情况 (14点到次日6点)
+    {
+        if(currentBJHour >= StartHourBJ || currentBJHour < EndHourBJ) return true;
+    }
+    else // 不跨天
+    {
+        if(currentBJHour >= StartHourBJ && currentBJHour < EndHourBJ) return true;
+    }
+    return false;
 }
 
 //+------------------------------------------------------------------+
@@ -75,13 +110,10 @@ bool CheckDailyLoss()
         DayStartTime = iTime(_Symbol, PERIOD_D1, 0);
         InitialBalance = AccountInfoDouble(ACCOUNT_BALANCE);
     }
-
-    double currentEquity = AccountInfoDouble(ACCOUNT_EQUITY);
-    double currentLoss = InitialBalance - currentEquity;
-
+    double currentLoss = InitialBalance - AccountInfoDouble(ACCOUNT_EQUITY);
     if(currentLoss >= DailyMaxLoss)
     {
-        Print("🔴 触发日损熔断！当前亏损: ", currentLoss, " 美元。执行自动关机。");
+        Print("🛑 触发日损限制！当前亏: ", currentLoss, "。EA自动下架。");
         CloseAllPositions();
         CancelAllOrders();
         ExpertRemove();
@@ -91,10 +123,14 @@ bool CheckDailyLoss()
 }
 
 //+------------------------------------------------------------------+
-//| 核心任务3：时间止损 (3分钟)                                         |
+//| 核心优化：时间止损 + 追踪止盈止损                                   |
 //+------------------------------------------------------------------+
-void HandlePositions()
+void HandlePositionsAndTrailing()
 {
+    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    double point = _Point;
+
     for(int i=PositionsTotal()-1; i>=0; i--)
     {
         ulong ticket = PositionGetTicket(i);
@@ -102,29 +138,53 @@ void HandlePositions()
         {
             if(PositionGetInteger(POSITION_MAGIC) == MagicNumber)
             {
-                // 3分钟强制平仓
+                // --- A. 核心任务3：3分钟强制时间平仓 ---
                 long openTime = PositionGetInteger(POSITION_TIME);
                 if(TimeCurrent() - openTime >= TimeLimitMin * 60)
                 {
                     trade.PositionClose(ticket);
-                    Print("⏰ [时间止损] 订单 #", ticket, " 持仓达3分钟，强制平仓。");
+                    Print("⏰ [时间止损] 订单 #", ticket, " 持仓达3分钟，强制离场。");
                     continue;
                 }
 
-                // 保本逻辑
+                // --- B. 追踪止盈/止损逻辑 ---
                 double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-                double curPrice = PositionGetDouble(POSITION_PRICE_CURRENT);
-                double sl = PositionGetDouble(POSITION_SL);
+                double currentSL = PositionGetDouble(POSITION_SL);
+                long posType = PositionGetInteger(POSITION_TYPE);
 
-                if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+                if(posType == POSITION_TYPE_BUY)
                 {
-                    if(curPrice > openPrice + 40*_Point && sl < openPrice)
-                        trade.PositionModify(ticket, openPrice + 2*_Point, 0);
+                    double profitPoints = (bid - openPrice) / point;
+                    // 如果获利超过追踪起点
+                    if(profitPoints >= TrailingStart)
+                    {
+                        double newSL = bid - TrailingStop * point;
+                        if(newSL > currentSL + 10 * point || currentSL == 0) // 只有往好方向移才更新
+                        {
+                            trade.PositionModify(ticket, NormalizeDouble(newSL, _Digits), 0);
+                        }
+                    }
+                    // 初始最大止损保护 (如果还没设止损)
+                    else if(currentSL == 0)
+                    {
+                        trade.PositionModify(ticket, NormalizeDouble(openPrice - InitialStopLoss * point, _Digits), 0);
+                    }
                 }
-                else
+                else if(posType == POSITION_TYPE_SELL)
                 {
-                    if(curPrice < openPrice - 40*_Point && (sl > openPrice || sl == 0))
-                        trade.PositionModify(ticket, openPrice - 2*_Point, 0);
+                    double profitPoints = (openPrice - ask) / point;
+                    if(profitPoints >= TrailingStart)
+                    {
+                        double newSL = ask + TrailingStop * point;
+                        if(newSL < currentSL - 10 * point || currentSL == 0)
+                        {
+                            trade.PositionModify(ticket, NormalizeDouble(newSL, _Digits), 0);
+                        }
+                    }
+                    else if(currentSL == 0)
+                    {
+                        trade.PositionModify(ticket, NormalizeDouble(openPrice + InitialStopLoss * point, _Digits), 0);
+                    }
                 }
             }
         }
@@ -132,71 +192,46 @@ void HandlePositions()
 }
 
 //+------------------------------------------------------------------+
-//| 核心任务1 & 2：挂单逻辑 (优化：增加过期重挂)                         |
+//| 核心任务1 & 2：OCO 突破挂单管理                                    |
 //+------------------------------------------------------------------+
 void ManageOrders()
 {
     int ordersCount = 0;
     int positionsCount = 0;
-    double buyOrderPrice = 0;
 
-    // 统计
     for(int i=PositionsTotal()-1; i>=0; i--)
         if(PositionSelectByTicket(PositionGetTicket(i)))
             if(PositionGetInteger(POSITION_MAGIC) == MagicNumber) positionsCount++;
 
     for(int i=OrdersTotal()-1; i>=0; i--)
-    {
         if(OrderSelect(OrderGetTicket(i)))
-        {
-            if(OrderGetInteger(ORDER_MAGIC) == MagicNumber)
-            {
-                ordersCount++;
-                if(OrderGetInteger(ORDER_TYPE) == ORDER_TYPE_BUY_STOP)
-                    buyOrderPrice = OrderGetDouble(ORDER_PRICE_OPEN);
-            }
-        }
-    }
+            if(OrderGetInteger(ORDER_MAGIC) == MagicNumber) ordersCount++;
 
-    // 核心任务2：一单成交，删另一单 (OCO)
+    // 核心任务2：一单成交，删另一单
     if(positionsCount > 0)
     {
-        if(ordersCount > 0)
-        {
-            CancelAllOrders();
-            Print("✅ 核心任务2：检测到仓位已成交，撤销剩余挂单。");
-        }
-        return; // 有持仓时不挂新单
+        if(ordersCount > 0) CancelAllOrders();
+        return;
     }
 
-    // --- 优化：挂单跟随逻辑 ---
-    // 如果已有挂单，但现价距离挂单已经超过 400 点（跑远了），则撤销重挂，保证陷阱始终在现价附近
-    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-    if(ordersCount > 0 && MathAbs(ask - buyOrderPrice) > (DistancePoints + 200) * _Point)
-    {
-        Print("🔄 价格已跑远，正在重置挂单位置...");
-        CancelAllOrders();
-        ordersCount = 0;
-    }
-
-    // 核心任务1：挂单
+    // 核心任务1：无仓无单时，在上下200点挂单
     if(positionsCount == 0 && ordersCount == 0)
     {
+        double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
         double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-        double point = _Point;
 
-        double buyStopPrice = ask + DistancePoints * point;
-        double sellStopPrice = bid - DistancePoints * point;
+        double buyStopPrice = ask + DistancePoints * _Point;
+        double sellStopPrice = bid - DistancePoints * _Point;
 
-        // 执行挂单
-        trade.BuyStop(LotSize, buyStopPrice, _Symbol, 0, buyStopPrice + TakeProfitPts * point, ORDER_TIME_GTC, 0, "BuyTrack");
-        trade.SellStop(LotSize, sellStopPrice, _Symbol, 0, sellStopPrice - TakeProfitPts * point, ORDER_TIME_GTC, 0, "SellTrack");
+        // 挂单不设固定止盈，靠追踪逻辑离场
+        trade.BuyStop(LotSize, buyStopPrice, _Symbol, buyStopPrice - InitialStopLoss * _Point, 0, ORDER_TIME_GTC, 0, "Pro_Buy");
+        trade.SellStop(LotSize, sellStopPrice, _Symbol, sellStopPrice + InitialStopLoss * _Point, 0, ORDER_TIME_GTC, 0, "Pro_Sell");
 
-        Print("🚀 核心任务1：已在价格 ", buyStopPrice, " 和 ", sellStopPrice, " 设下陷阱。");
+        Print("🚀 突破单已挂出。等待激活...");
     }
 }
 
-//--- 清理函数
+//--- 工具函数
 void CloseAllPositions()
 {
     for(int i=PositionsTotal()-1; i>=0; i--)
