@@ -57,7 +57,7 @@ tQIDAQAB
 class QueryApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("API 高速自动化查询工具 (含逾期拦截)")
+        self.root.title("API 高速自动化查询工具 (终极智能版)")
         self.root.geometry("680x600")
         self.session = requests.Session()
 
@@ -138,7 +138,6 @@ class QueryApp:
             req_headers = {"token": token, "Content-Type": "application/json"}
             df = pd.read_excel(self.excel_path.get(), dtype=str)
 
-            # --- 更新表头：增加黑名单核验 ---
             headers_list = [
                 "姓名", "身份证", "核验结果", "黑名单核验", "当前逾期机构数", "当前履约机构数",
                 "异常还款机构数", "睡眠机构数", "最大履约金额", "最近履约时间",
@@ -158,108 +157,102 @@ class QueryApp:
 
             for index, row in df.iterrows():
                 name = str(row['姓名']).strip()
-                id_card = str(row['身份证']).strip()
+                id_card = str(row['身份证']).strip().upper()  # 强制转大写，防止小写 x 导致校验失败
                 if id_card.endswith('.0'): id_card = id_card[:-2]
 
                 self.log(f"--- 正在处理: {name} (身份证: {id_card[:6]}****{id_card[-4:]}) ---")
 
-                # 初始化默认值
                 row_data = {key: "" for key in headers_list}
                 row_data["姓名"] = name
                 row_data["身份证"] = id_card
-                row_data["黑名单核验"] = "-"  # 默认值为 -
+                row_data["黑名单核验"] = "-"
 
                 try:
-                    # 1. 查询缓存
                     payload1 = CryptoUtil.encrypt_payload(
                         {"name": name, "idN": id_card, "phone": "13888888888", "apitype": 4,
                          "nickname": "济南默默电子商务有限公司", "usr": 7})
                     self.session.post("https://search.azbbzzc.com/htOrderss/checkOne", json=payload1,
                                       headers=req_headers)
 
-                    # 2. 生成订单
                     payload2 = CryptoUtil.encrypt_payload(
                         {"name": name, "idN": id_card, "phone": "13888888888", "apitype": "10",
                          "nickname": "测试手机租赁", "usr": 67})
                     res2 = self.session.post("https://search.azbbzzc.com/htOrderss", json=payload2, headers=req_headers)
 
-                    order_id = None
-                    try:
-                        order_id = res2.json().get("id")
-                    except Exception:
-                        pass
+                    order_id = res2.json().get("id") if res2.status_code == 200 else None
 
                     if order_id:
                         self.log(f"{name} 计费订单生成成功 (ID: {order_id})")
 
-                        # 3. 核心步骤：真实二要素核验
                         auth_params = {"name": name, "id": id_card, "type": 1, "order_id": str(order_id)}
                         res_auth = self.session.post("https://search.azbbzzc.com/auth_895w6q", params=auth_params,
                                                      headers=req_headers)
                         auth_json = res_auth.json()
 
-                        # 判断真实核验结果
                         if str(auth_json.get("code")) == "0":
                             self.log(f"{name} 真实核验结果：一致。正在查询逾期...")
                             row_data["核验结果"] = "一致"
 
-                            # ----------------------------------------
-                            # 4. 新增步骤：查询逾期并拦截
-                            # ----------------------------------------
+                            # 查询逾期
                             overdue_url = f"https://search.azbbzzc.com/htOrderss/checkOverdue/{order_id}"
                             res_overdue = self.session.post(overdue_url, json={}, headers=req_headers)
                             overdue_json = res_overdue.json()
 
-                            # 防御式解析 JSON，提取 markM12Count
                             mark_m12_count = 0
                             try:
-                                outer_data = overdue_json.get("data") or {}
-                                inner_data = outer_data.get("data") or {}
-                                mark_m12_count = inner_data.get("markM12Count", 0)
+                                mark_m12_count = overdue_json.get("data", {}).get("data", {}).get("markM12Count", 0)
                             except Exception:
                                 pass
 
                             if mark_m12_count != 0:
-                                # 命中拦截，不再查询小雷达
                                 row_data["黑名单核验"] = "命中"
                                 self.log(f"{name} 逾期命中 (markM12Count: {mark_m12_count})，跳过小雷达详情查询。")
                             else:
-                                # 未命中，继续查询小雷达
                                 row_data["黑名单核验"] = "未命中"
                                 self.log(f"{name} 逾期未命中，正在触发小雷达A版...")
 
-                                # 5. 触发小雷达
                                 payload_check2 = {"apiTpye": 15, "order_id": str(order_id)}
                                 self.session.post("https://search.azbbzzc.com/htOrderss/checkTwo", json=payload_check2,
                                                   headers=req_headers)
-                                time.sleep(1)  # 等待报告生成
 
-                                # 6. 拉取详情数据
+                                # 【核心修复：智能轮询机制】
+                                max_retries = 5
+                                detail_fetched = False
                                 detail_params = {"name": name, "id": id_card, "phone": "13888888888", "type": 1,
                                                  "order_id": str(order_id)}
-                                res_detail = self.session.post("https://search.azbbzzc.com/xyUnifyB",
-                                                               params=detail_params, headers=req_headers)
-                                detail_json = res_detail.json()
 
-                                if str(detail_json.get("code")) == "0":
-                                    data_dict = detail_json.get("data") or {}
-                                    details = data_dict.get("result_detail") or {}
+                                for attempt in range(max_retries):
+                                    time.sleep(2)  # 每次拉取前休息2秒，给系统生成报告的时间
+                                    res_detail = self.session.post("https://search.azbbzzc.com/xyUnifyB",
+                                                                   params=detail_params, headers=req_headers)
+                                    detail_json = res_detail.json()
 
-                                    # 将拉取到的数据填入 Excel 列中
-                                    for code, val in details.items():
-                                        if code in FIELD_MAP:
-                                            row_data[FIELD_MAP[code]] = val
-                                    self.log(f"{name} 详情数据拉取并解析成功！")
-                                else:
-                                    self.log(f"{name} 获取详情失败: {detail_json.get('msg')}")
+                                    if str(detail_json.get("code")) == "0":
+                                        data_dict = detail_json.get("data") or {}
+                                        details = data_dict.get("result_detail")
+
+                                        if details:  # 只要 details 有数据，说明报告生成完了
+                                            for code, val in details.items():
+                                                if code in FIELD_MAP:
+                                                    row_data[FIELD_MAP[code]] = val
+                                            self.log(f"{name} 详情数据拉取并解析成功！")
+                                            detail_fetched = True
+                                            break
+                                        else:
+                                            self.log(f"{name} 报告生成中，等待重试 ({attempt + 1}/{max_retries})...")
+                                    else:
+                                        self.log(f"{name} 获取详情失败: {detail_json.get('msg')}")
+                                        break  # 遇到如"身份证校验失败"这种硬错误，直接退出轮询
+
+                                if not detail_fetched and str(detail_json.get("code")) == "0":
+                                    self.log(f"{name} 获取详情超时，可能该用户没有任何雷达数据。")
 
                         else:
-                            # auth 接口返回不一致
                             self.log(f"{name} 真实核验结果：不一致 ({auth_json.get('msg')})")
                             row_data["核验结果"] = "不一致"
                             row_data["黑名单核验"] = "-"
                     else:
-                        self.log(f"{name} 订单生成失败。HTTP状态: {res2.status_code}, 服务器返回: {res2.text}")
+                        self.log(f"{name} 订单生成失败。服务器返回: {res2.text}")
                         row_data["核验结果"] = "订单生成失败"
                         row_data["黑名单核验"] = "-"
 
@@ -271,11 +264,10 @@ class QueryApp:
                 results.append(row_data)
                 self.save_to_csv_realtime(row_data, backup_csv, headers_list)
 
-                # --- 防刷频安全间隔机制 ---
-                sleep_time = random.uniform(1.5, 2.5)
-                time.sleep(sleep_time)
+                # 防刷频安全间隔
+                time.sleep(random.uniform(1.5, 2.5))
 
-            # --- 全部查完，导出最终 Excel ---
+            # --- 导出最终 Excel ---
             output_df = pd.DataFrame(results)
             output_df.to_excel(final_excel, index=False)
             self.log("--- 任务全部完成！ ---")
