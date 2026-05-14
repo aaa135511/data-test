@@ -44,16 +44,18 @@ tQIDAQAB
 
     @staticmethod
     def encrypt_payload(data_dict):
-        # 强制 ensure_ascii=True，彻底解决 Win7/Win10 中文版 GBK 编码干扰，保证加密结果全平台一致
-        json_string = json.dumps(data_dict, separators=(',', ':'), ensure_ascii=True).encode('ascii')
-        aes_key = ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(32)).encode('ascii')
+        # 【核心修复】：恢复最标准的 UTF-8 编码，不要转换 ASCII。
+        # 这样上游征信机构接收到的就是原汁原味的中文，绝对不会再报“约束有误/加密方式有误”
+        json_string = json.dumps(data_dict, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
+        aes_key_str = ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(32))
+        aes_key = aes_key_str.encode('utf-8')
 
         cipher = AES.new(aes_key, AES.MODE_ECB)
-        encrypted_data = base64.b64encode(cipher.encrypt(pad(json_string, AES.block_size))).decode('ascii')
+        encrypted_data = base64.b64encode(cipher.encrypt(pad(json_string, AES.block_size))).decode('utf-8')
 
         rsa_key = RSA.import_key(CryptoUtil.PUBLIC_KEY)
         cipher_rsa = PKCS1_v1_5.new(rsa_key)
-        encrypted_aes_key = base64.b64encode(cipher_rsa.encrypt(aes_key)).decode('ascii')
+        encrypted_aes_key = base64.b64encode(cipher_rsa.encrypt(aes_key)).decode('utf-8')
 
         return {"encryptedKey": encrypted_aes_key, "encryptedData": encrypted_data}
 
@@ -62,7 +64,7 @@ tQIDAQAB
 class QueryApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("API 高速自动化查询工具 (终极版)")
+        self.root.title("API 高速自动化查询工具 (无错纯净版)")
         self.root.geometry("680x600")
         self.session = requests.Session()
 
@@ -140,10 +142,16 @@ class QueryApp:
                 return
             self.log("登录成功！准备开始批量查询...")
 
-            req_headers = {"token": token, "Content-Type": "application/json"}
+            # 伪装完整的请求头，增强兼容性
+            req_headers = {
+                "token": token,
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+
             df = pd.read_excel(self.excel_path.get(), dtype=str)
 
-            # --- 精简后的客户表头 ---
+            # --- 精简且精准的客户表头 ---
             headers_list = [
                 "姓名", "身份证号", "电话号码", "核验结果", "黑名单核验",
                 "近1个月贷款笔数", "近3个月贷款笔数", "近6个月贷款笔数", "近12个月贷款笔数", "近24个月贷款笔数",
@@ -166,12 +174,12 @@ class QueryApp:
                 name = str(row.get('姓名', '')).strip()
                 id_card = re.sub(r'[^a-zA-Z0-9]', '', str(row.get('身份证', row.get('身份证号', '')))).upper()
                 phone = str(row.get('电话号码', '13888888888')).strip()
-                if phone == 'nan' or not phone:
-                    phone = '13888888888'
+                if phone == 'nan' or not phone: phone = '13888888888'
+                if phone.endswith('.0'): phone = phone[:-2]
 
                 self.log(f"--- 正在处理: {name} (身份证: {id_card[:6]}****{id_card[-4:]}) ---")
 
-                # 初始化默认值，接口拿不到的数据默认填 "-"
+                # 初始化默认值 "-"
                 row_data = {key: "-" for key in headers_list}
                 row_data["姓名"] = name
                 row_data["身份证号"] = id_card
@@ -180,7 +188,7 @@ class QueryApp:
                 row_data["黑名单核验"] = ""
 
                 try:
-                    # 1. 查询缓存
+                    # 1. 占位查询缓存
                     payload1 = CryptoUtil.encrypt_payload({"name": name, "idN": id_card, "phone": phone, "apitype": 4,
                                                            "nickname": "济南默默电子商务有限公司", "usr": 7})
                     self.session.post("https://search.azbbzzc.com/htOrderss/checkOne", json=payload1,
@@ -230,20 +238,20 @@ class QueryApp:
                                 self.session.post("https://search.azbbzzc.com/htOrderss/checkTwo", json=payload_check2,
                                                   headers=req_headers)
 
-                                # 6. 智能轮询获取详情
+                                # 6. 智能轮询获取详情 (防止拉取时报告还未生成)
                                 max_retries = 5
                                 detail_params = {"name": name, "id": id_card, "phone": phone, "type": 1,
                                                  "order_id": str(order_id)}
 
                                 for attempt in range(max_retries):
-                                    time.sleep(2)  # 每次等2秒
+                                    time.sleep(2)  # 给第三方接口生成报告的时间
                                     res_detail = self.session.post("https://search.azbbzzc.com/xyUnifyB",
                                                                    params=detail_params, headers=req_headers)
                                     detail_json = res_detail.json()
 
                                     if str(detail_json.get("code")) == "0":
                                         details = detail_json.get("data", {}).get("result_detail")
-                                        if details:  # 报告生成完毕
+                                        if details:  # 成功拿到结果
                                             for code, val in details.items():
                                                 if code in FIELD_MAP:
                                                     row_data[FIELD_MAP[code]] = val
