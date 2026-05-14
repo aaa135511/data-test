@@ -38,8 +38,17 @@ tQIDAQAB
 -----END PUBLIC KEY-----"""
 
     @staticmethod
-    def encrypt_payload(data_dict):
-        json_string = json.dumps(data_dict, separators=(',', ':'), ensure_ascii=False, sort_keys=True).encode('utf-8')
+    def encrypt_payload(name, idN, phone, apitype, nickname, usr):
+        # 【核心修复1】完全复刻客户给的 jiami.py，一字不差！
+        obj = {
+            "name": name,
+            "idN": idN,
+            "phone": phone,
+            "apitype": apitype,
+            "nickname": nickname,
+            "usr": usr
+        }
+        json_string = json.dumps(obj, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
         aes_key_str = ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(32))
         aes_key = aes_key_str.encode('utf-8')
         cipher = AES.new(aes_key, AES.MODE_ECB)
@@ -53,7 +62,7 @@ tQIDAQAB
 class QueryApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("API 高速自动化查询工具 (无错诊断版)")
+        self.root.title("API 高速自动化查询工具 (终极修正版)")
         self.root.geometry("680x600")
         self.session = requests.Session()
         self.session.headers.update({
@@ -134,75 +143,68 @@ class QueryApp:
                     {"姓名": name, "身份证号": id_card, "电话号码": phone, "核验结果": "", "黑名单核验": ""})
 
                 try:
-                    payload1 = CryptoUtil.encrypt_payload(
-                        {"name": name, "idN": id_card, "phone": phone, "apitype": 4, "nickname": "测试", "usr": 7})
+                    # 1. 缓存查询
+                    payload1 = CryptoUtil.encrypt_payload(name, id_card, phone, 4, "济南默默电子商务有限公司", 7)
                     self.session.post("https://search.azbbzzc.com/htOrderss/checkOne", json=payload1,
                                       headers=req_headers)
 
-                    payload2 = CryptoUtil.encrypt_payload(
-                        {"name": name, "idN": id_card, "phone": phone, "apitype": 10, "nickname": "测试", "usr": 67})
+                    # 2. 生成计费订单 (【核心修复2】严格使用真实商户名)
+                    payload2 = CryptoUtil.encrypt_payload(name, id_card, phone, 10, "测试手机租赁", 67)
                     res2 = self.session.post("https://search.azbbzzc.com/htOrderss", json=payload2,
                                              headers=req_headers).json()
-                    order_id = res2.get("id");
-                    masked_id = res2.get("idN")
 
-                    if order_id and masked_id:
-                        safe_name = quote(name);
-                        safe_id = quote(masked_id)
-                        referer_url = f"https://search.azbbzzc.com/pages/user/updateUser.html?name={safe_name}&id={safe_id}&apitype=10&order_id={order_id}"
+                    order_id = res2.get("id")
+                    masked_id = res2.get("idN", id_card)
+
+                    if order_id:
+                        # 【核心修复3】只给姓名编码，打码的身份证号千万不能转码，保留原汁原味的 * 号！
+                        safe_name = quote(name)
+
+                        # 构建最严谨的 Referer
+                        referer_url = f"https://search.azbbzzc.com/pages/user/updateUser.html?name={safe_name}&id={masked_id}&apitype=10&userId={order_id}&phone={phone}&type=1&order_id={order_id}&link=null"
                         current_headers = req_headers.copy()
                         current_headers["Referer"] = referer_url
 
                         # 真实核验
-                        auth_url = f"https://search.azbbzzc.com/auth_895w6q?name={safe_name}&id={safe_id}&type=1&order_id={order_id}"
-                        res_auth = self.session.post(auth_url, headers=current_headers)
-                        auth_json = res_auth.json()
+                        auth_url = f"https://search.azbbzzc.com/auth_895w6q?name={safe_name}&id={masked_id}&type=1&order_id={order_id}"
+                        res_auth = self.session.post(auth_url, headers=current_headers).json()
 
-                        if str(auth_json.get("code")) == "0":
+                        if str(res_auth.get("code")) == "0":
                             row_data["核验结果"] = "一致";
                             self.log(f"{name} 核验一致")
 
-                            # 逾期查询 (安全提取防止报错)
-                            res_over_raw = self.session.post(
+                            # 逾期小雷达判断
+                            res_over = self.session.post(
                                 f"https://search.azbbzzc.com/htOrderss/checkOverdue/{order_id}", json={},
-                                headers=current_headers)
-                            m12 = 0
-                            try:
-                                over_json = res_over_raw.json()
-                                d1 = over_json.get("data")
-                                if isinstance(d1, dict):
-                                    d2 = d1.get("data")
-                                    if isinstance(d2, dict):
-                                        m12 = d2.get("markM12Count", 0)
-                            except:
-                                pass
+                                headers=current_headers).json()
+                            m12 = res_over.get("data", {}).get("data", {}).get("markM12Count", 0)
 
                             if m12 != 0:
                                 row_data["黑名单核验"] = "命中";
                                 self.log(f"{name} 黑名单拦截")
                             else:
-                                row_data["黑名单核验"] = "未命中"
+                                row_data["黑名单核验"] = "未命中";
                                 self.log(f"{name} 逾期未命中，触发小雷达...")
+
                                 self.session.post("https://search.azbbzzc.com/htOrderss/checkTwo",
                                                   json={"apiTpye": 15, "order_id": str(order_id)},
                                                   headers=current_headers)
 
-                                # 小雷达详情轮询
+                                # 轮询获取详情
                                 for attempt in range(5):
                                     time.sleep(2)
-                                    detail_url = f"https://search.azbbzzc.com/xyUnifyB?name={safe_name}&id={safe_id}&phone={phone}&type=1&order_id={order_id}"
-                                    res_det = self.session.post(detail_url, headers=current_headers)
+                                    detail_url = f"https://search.azbbzzc.com/xyUnifyB?name={safe_name}&id={masked_id}&phone={phone}&type=1&order_id={order_id}"
+                                    res_det = self.session.post(detail_url, data="", headers=current_headers)
 
                                     try:
                                         res_det_json = res_det.json()
                                     except Exception:
-                                        self.log(f"【底层原始返回】详情接口未返回JSON格式: {res_det.text}")
+                                        self.log(f"【底层原始返回】详情非JSON: {res_det.text}")
                                         break
 
                                     if str(res_det_json.get("code")) == "0":
+                                        # 【彻底修复报错】严格检查 isinstance，绝对不再报 'str' object has no attribute 'get'
                                         data_obj = res_det_json.get("data")
-
-                                        # 【防弹解析】严格判断返回的数据结构是不是字典
                                         if isinstance(data_obj, dict):
                                             details = data_obj.get("result_detail")
                                             if isinstance(details, dict):
@@ -213,20 +215,19 @@ class QueryApp:
                                             else:
                                                 self.log(f"{name} 报告生成中... ({attempt + 1}/5)")
                                         else:
-                                            self.log(f"【底层原始返回】拉取成功但数据异常: {res_det.text}")
+                                            self.log(f"【底层原始返回】数据格式异常: {res_det.text}")
                                             break
                                     else:
                                         self.log(f"【底层原始返回】拉取详情报错: {res_det.text}")
                                         break
                         else:
                             row_data["核验结果"] = "不一致";
-                            self.log(f"{name} 不一致: {auth_json.get('msg')}")
+                            self.log(f"{name} 不一致: {res_auth.get('msg')}")
                     else:
                         self.log(f"{name} 订单失败")
                 except Exception as e:
                     import traceback
                     self.log(f"内部异常: {str(e)}")
-                    # 如果需要极度详细的错误位置，可以把下面这行注释打开：
                     # self.log(traceback.format_exc())
 
                 results.append(row_data);
