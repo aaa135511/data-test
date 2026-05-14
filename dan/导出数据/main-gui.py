@@ -17,16 +17,11 @@ from Crypto.Util.Padding import pad
 
 # 字段精准映射表 (JSON编码 -> 客户要求的新表头)
 FIELD_MAP = {
-    "B22170002": "近1个月贷款笔数",
-    "B22170003": "近3个月贷款笔数",
-    "B22170004": "近6个月贷款笔数",
-    "B22170005": "近12个月贷款笔数",
-    "B22170006": "近24个月贷款笔数",
-    "B22170007": "近1个月贷款总金额",
-    "B22170008": "近3个月贷款总金额",
-    "B22170009": "近6个月贷款总金额",
-    "B22170010": "近12个月贷款总金额",
-    "B22170011": "近24个月贷款总金额"
+    "B22170002": "近1个月贷款笔数", "B22170003": "近3个月贷款笔数",
+    "B22170004": "近6个月贷款笔数", "B22170005": "近12个月贷款笔数",
+    "B22170006": "近24个月贷款笔数", "B22170007": "近1个月贷款总金额",
+    "B22170008": "近3个月贷款总金额", "B22170009": "近6个月贷款总金额",
+    "B22170010": "近12个月贷款总金额", "B22170011": "近24个月贷款总金额"
 }
 
 
@@ -44,17 +39,13 @@ tQIDAQAB
 
     @staticmethod
     def encrypt_payload(data_dict):
-        # 恢复为标准的 ensure_ascii=False 和 utf-8 编码，这是对方服务器唯一能正确解析中文的格式
         json_string = json.dumps(data_dict, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
         aes_key = ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(32)).encode('utf-8')
-
         cipher = AES.new(aes_key, AES.MODE_ECB)
         encrypted_data = base64.b64encode(cipher.encrypt(pad(json_string, AES.block_size))).decode('utf-8')
-
         rsa_key = RSA.import_key(CryptoUtil.PUBLIC_KEY)
         cipher_rsa = PKCS1_v1_5.new(rsa_key)
         encrypted_aes_key = base64.b64encode(cipher_rsa.encrypt(aes_key)).decode('utf-8')
-
         return {"encryptedKey": encrypted_aes_key, "encryptedData": encrypted_data}
 
 
@@ -62,7 +53,7 @@ tQIDAQAB
 class QueryApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("API 高速自动化查询工具 (无错交付版)")
+        self.root.title("API 高速自动化查询工具 (修复打码校验版)")
         self.root.geometry("680x600")
         self.session = requests.Session()
 
@@ -83,12 +74,10 @@ class QueryApp:
 
         frame_file = tk.LabelFrame(self.root, text="文件与路径配置", padx=10, pady=10)
         frame_file.pack(fill="x", padx=10, pady=5)
-
         tk.Label(frame_file, text="数据源:").grid(row=0, column=0, sticky="e")
         tk.Entry(frame_file, textvariable=self.excel_path, width=45, state="readonly").grid(row=0, column=1, padx=5,
                                                                                             pady=5)
         tk.Button(frame_file, text="导入Excel", command=self.select_file).grid(row=0, column=2, padx=5, pady=5)
-
         tk.Label(frame_file, text="导出到:").grid(row=1, column=0, sticky="e")
         tk.Entry(frame_file, textvariable=self.export_path, width=45, state="readonly").grid(row=1, column=1, padx=5,
                                                                                              pady=5)
@@ -116,7 +105,7 @@ class QueryApp:
 
     def start_task_thread(self):
         if not self.excel_path.get() or not self.export_path.get():
-            messagebox.showwarning("警告", "请先导入数据源文件并选择导出目录！")
+            messagebox.showwarning("警告", "请先选择路径！")
             return
         threading.Thread(target=self.run_automation, daemon=True).start()
 
@@ -125,7 +114,7 @@ class QueryApp:
             with open(csv_filename, mode='a', newline='', encoding='utf-8-sig') as f:
                 writer = csv.DictWriter(f, fieldnames=headers_list)
                 writer.writerow(row_dict)
-        except Exception:
+        except:
             pass
 
     def run_automation(self):
@@ -143,7 +132,6 @@ class QueryApp:
             req_headers = {"token": token, "Content-Type": "application/json"}
             df = pd.read_excel(self.excel_path.get(), dtype=str)
 
-            # --- 精简后的客户表头 ---
             headers_list = [
                 "姓名", "身份证号", "电话号码", "核验结果", "黑名单核验",
                 "近1个月贷款笔数", "近3个月贷款笔数", "近6个月贷款笔数", "近12个月贷款笔数", "近24个月贷款笔数",
@@ -162,34 +150,31 @@ class QueryApp:
             results = []
 
             for index, row in df.iterrows():
-                # 极致数据清理，彻底防止由于 Excel 读取引发的验证失败
                 name = str(row.get('姓名', '')).strip()
                 id_card = re.sub(r'[^a-zA-Z0-9]', '', str(row.get('身份证', row.get('身份证号', '')))).upper()
-
                 phone_raw = str(row.get('电话号码', '13888888888')).strip()
                 if phone_raw.endswith('.0'): phone_raw = phone_raw[:-2]
                 phone = phone_raw if phone_raw != 'nan' and phone_raw else '13888888888'
 
                 self.log(f"--- 正在处理: {name} (身份证: {id_card[:6]}****{id_card[-4:]}) ---")
 
-                # 初始化默认值
                 row_data = {key: "-" for key in headers_list}
-                row_data["姓名"] = name
-                row_data["身份证号"] = id_card
+                row_data["姓名"] = name;
+                row_data["身份证号"] = id_card;
                 row_data["电话号码"] = phone
-                row_data["核验结果"] = ""
+                row_data["核验结果"] = "";
                 row_data["黑名单核验"] = ""
 
                 try:
-                    # 1. 查询缓存
+                    # 1. 查缓存
                     payload1 = CryptoUtil.encrypt_payload({"name": name, "idN": id_card, "phone": phone, "apitype": 4,
                                                            "nickname": "济南默默电子商务有限公司", "usr": 7})
                     self.session.post("https://search.azbbzzc.com/htOrderss/checkOne", json=payload1,
                                       headers=req_headers)
 
-                    # 2. 生成计费订单
+                    # 2. 生成计费订单 (这一步传入的是明文)
                     payload2 = CryptoUtil.encrypt_payload(
-                        {"name": name, "idN": id_card, "phone": phone, "apitype": "10", "nickname": "测试手机租赁",
+                        {"name": name, "idN": id_card, "phone": phone, "apitype": 10, "nickname": "测试手机租赁",
                          "usr": 67})
                     res2 = self.session.post("https://search.azbbzzc.com/htOrderss", json=payload2, headers=req_headers)
 
@@ -198,8 +183,12 @@ class QueryApp:
                     if order_id:
                         self.log(f"{name} 计费订单生成成功 (ID: {order_id})")
 
+                        # 【核心修复】：提取服务器返回的打码身份证，后续请求必须使用打码版，否则小雷达校验必报错！
+                        masked_id = res2.json().get("idN")
+                        if not masked_id: masked_id = id_card  # 防御性降级
+
                         # 3. 真实二要素核验
-                        auth_params = {"name": name, "id": id_card, "type": 1, "order_id": str(order_id)}
+                        auth_params = {"name": name, "id": masked_id, "type": 1, "order_id": str(order_id)}
                         res_auth = self.session.post("https://search.azbbzzc.com/auth_895w6q", params=auth_params,
                                                      headers=req_headers)
                         auth_json = res_auth.json()
@@ -208,74 +197,69 @@ class QueryApp:
                             self.log(f"{name} 真实核验结果：一致。正在查询逾期...")
                             row_data["核验结果"] = "一致"
 
-                            # 4. 查询逾期与拦截
-                            overdue_url = f"https://search.azbbzzc.com/htOrderss/checkOverdue/{order_id}"
-                            res_overdue = self.session.post(overdue_url, json={}, headers=req_headers)
+                            res_overdue = self.session.post(
+                                f"https://search.azbbzzc.com/htOrderss/checkOverdue/{order_id}", json={},
+                                headers=req_headers)
 
                             mark_m12_count = 0
                             try:
                                 mark_m12_count = res_overdue.json().get("data", {}).get("data", {}).get("markM12Count",
                                                                                                         0)
-                            except Exception:
+                            except:
                                 pass
 
                             if mark_m12_count != 0:
                                 row_data["黑名单核验"] = "命中"
-                                self.log(f"{name} 逾期命中，跳过小雷达查询。")
+                                self.log(f"{name} 逾期命中，跳过小雷达。")
                             else:
                                 row_data["黑名单核验"] = "未命中"
                                 self.log(f"{name} 逾期未命中，触发小雷达A版...")
 
-                                # 5. 触发小雷达
-                                payload_check2 = {"apiTpye": 15, "order_id": str(order_id)}
-                                self.session.post("https://search.azbbzzc.com/htOrderss/checkTwo", json=payload_check2,
-                                                  headers=req_headers)
+                                # 4. 触发小雷达
+                                self.session.post("https://search.azbbzzc.com/htOrderss/checkTwo",
+                                                  json={"apiTpye": 15, "order_id": str(order_id)}, headers=req_headers)
 
-                                # 6. 智能轮询获取详情 (防止拉回来是空数据)
+                                # 5. 轮询获取小雷达详情 (使用 masked_id !)
                                 max_retries = 5
-                                detail_params = {"name": name, "id": id_card, "phone": phone, "type": 1,
+                                detail_params = {"name": name, "id": masked_id, "phone": phone, "type": 1,
                                                  "order_id": str(order_id)}
 
                                 for attempt in range(max_retries):
-                                    time.sleep(2)  # 每次等2秒，等待第三方数据返回
+                                    time.sleep(2)
                                     res_detail = self.session.post("https://search.azbbzzc.com/xyUnifyB",
-                                                                   params=detail_params, headers=req_headers)
+                                                                   params=detail_params, data="", headers=req_headers)
                                     detail_json = res_detail.json()
 
                                     if str(detail_json.get("code")) == "0":
                                         details = detail_json.get("data", {}).get("result_detail")
-                                        if details:  # 只要解析出详情字段，即视为成功
+                                        if details:
                                             for code, val in details.items():
-                                                if code in FIELD_MAP:
-                                                    row_data[FIELD_MAP[code]] = val
+                                                if code in FIELD_MAP: row_data[FIELD_MAP[code]] = val
                                             self.log(f"{name} 详情数据拉取并解析成功！")
                                             break
                                         else:
-                                            self.log(f"{name} 报告生成中，正在重试 ({attempt + 1}/{max_retries})...")
+                                            self.log(f"{name} 报告生成中，等待重试 ({attempt + 1}/{max_retries})...")
                                     else:
-                                        self.log(f"{name} 获取详情失败: {detail_json.get('msg')}")
+                                        err_msg = detail_json.get('msg', '未知报错')
+                                        self.log(f"{name} 获取详情失败: {err_msg}")
                                         break
                         else:
                             self.log(f"{name} 核验不一致: {auth_json.get('msg')}")
-                            row_data["核验结果"] = "不一致"
+                            row_data["核验结果"] = "不一致";
                             row_data["黑名单核验"] = "-"
                     else:
                         self.log(f"{name} 订单生成失败: {res2.text}")
-                        row_data["核验结果"] = "订单生成失败"
+                        row_data["核验结果"] = "订单生成失败";
                         row_data["黑名单核验"] = "-"
 
                 except Exception as inner_e:
                     self.log(f"{name} 查询异常: {str(inner_e)}")
                     row_data["核验结果"] = "查询异常"
 
-                # 保存记录
                 results.append(row_data)
                 self.save_to_csv_realtime(row_data, backup_csv, headers_list)
-
-                # 防刷频安全间隔
                 time.sleep(random.uniform(1.5, 2.5))
 
-            # --- 导出 ---
             output_df = pd.DataFrame(results)
             output_df.to_excel(final_excel, index=False)
             self.log("--- 任务全部完成！ ---")
@@ -283,7 +267,6 @@ class QueryApp:
 
         except Exception as e:
             self.log(f"执行中断，严重错误: {str(e)}")
-            self.root.after(0, lambda: messagebox.showerror("错误", f"程序未能执行到底:\n{str(e)}"))
 
 
 if __name__ == "__main__":
