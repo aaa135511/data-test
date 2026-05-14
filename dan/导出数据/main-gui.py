@@ -25,7 +25,7 @@ FIELD_MAP = {
 }
 
 
-# --- 加密工具类 ---
+# --- 加密工具类 (全平台强兼容版) ---
 class CryptoUtil:
     PUBLIC_KEY = """-----BEGIN PUBLIC KEY-----
 MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqt2A/9Yt3sPrdDE6LZCJ
@@ -39,13 +39,21 @@ tQIDAQAB
 
     @staticmethod
     def encrypt_payload(data_dict):
-        json_string = json.dumps(data_dict, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
-        aes_key = ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(32)).encode('utf-8')
+        # 【关键修正】：增加 sort_keys=True
+        # 确保字典在任何操作系统（Win7/Win10/Win11）下生成的字符串顺序完全一致
+        json_string = json.dumps(data_dict, separators=(',', ':'), ensure_ascii=False, sort_keys=True).encode('utf-8')
+
+        # 使用固定的字符集生成 AES Key
+        aes_key_str = ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(32))
+        aes_key = aes_key_str.encode('utf-8')
+
         cipher = AES.new(aes_key, AES.MODE_ECB)
         encrypted_data = base64.b64encode(cipher.encrypt(pad(json_string, AES.block_size))).decode('utf-8')
+
         rsa_key = RSA.import_key(CryptoUtil.PUBLIC_KEY)
         cipher_rsa = PKCS1_v1_5.new(rsa_key)
         encrypted_aes_key = base64.b64encode(cipher_rsa.encrypt(aes_key)).decode('utf-8')
+
         return {"encryptedKey": encrypted_aes_key, "encryptedData": encrypted_data}
 
 
@@ -53,9 +61,13 @@ tQIDAQAB
 class QueryApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("API 高速自动化查询工具 (修复打码校验版)")
+        self.root.title("API 高速自动化查询工具 (全系统兼容交付版)")
         self.root.geometry("680x600")
         self.session = requests.Session()
+        # 强制设置 User-Agent，防止旧系统默认 UA 被服务器拦截
+        self.session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        })
 
         self.excel_path = tk.StringVar()
         self.export_path = tk.StringVar()
@@ -150,6 +162,7 @@ class QueryApp:
             results = []
 
             for index, row in df.iterrows():
+                # 极致数据清洗
                 name = str(row.get('姓名', '')).strip()
                 id_card = re.sub(r'[^a-zA-Z0-9]', '', str(row.get('身份证', row.get('身份证号', '')))).upper()
                 phone_raw = str(row.get('电话号码', '13888888888')).strip()
@@ -172,22 +185,23 @@ class QueryApp:
                     self.session.post("https://search.azbbzzc.com/htOrderss/checkOne", json=payload1,
                                       headers=req_headers)
 
-                    # 2. 生成计费订单 (这一步传入的是明文)
+                    # 2. 生成计费订单
                     payload2 = CryptoUtil.encrypt_payload(
                         {"name": name, "idN": id_card, "phone": phone, "apitype": 10, "nickname": "测试手机租赁",
                          "usr": 67})
                     res2 = self.session.post("https://search.azbbzzc.com/htOrderss", json=payload2, headers=req_headers)
 
-                    order_id = res2.json().get("id") if res2.status_code == 200 else None
+                    order_res_json = res2.json()
+                    order_id = order_res_json.get("id") if res2.status_code == 200 else None
 
                     if order_id:
                         self.log(f"{name} 计费订单生成成功 (ID: {order_id})")
 
-                        # 【核心修复】：提取服务器返回的打码身份证，后续请求必须使用打码版，否则小雷达校验必报错！
-                        masked_id = res2.json().get("idN")
+                        # 【全系统兼容修正】：必须提取服务器返回的打码身份证 idN
+                        masked_id = order_res_json.get("idN")
                         if not masked_id: masked_id = id_card  # 防御性降级
 
-                        # 3. 真实二要素核验
+                        # 3. 真实二要素核验 (URL 参数使用打码 ID)
                         auth_params = {"name": name, "id": masked_id, "type": 1, "order_id": str(order_id)}
                         res_auth = self.session.post("https://search.azbbzzc.com/auth_895w6q", params=auth_params,
                                                      headers=req_headers)
@@ -219,13 +233,14 @@ class QueryApp:
                                 self.session.post("https://search.azbbzzc.com/htOrderss/checkTwo",
                                                   json={"apiTpye": 15, "order_id": str(order_id)}, headers=req_headers)
 
-                                # 5. 轮询获取小雷达详情 (使用 masked_id !)
+                                # 5. 智能轮询 (使用打码 ID)
                                 max_retries = 5
                                 detail_params = {"name": name, "id": masked_id, "phone": phone, "type": 1,
                                                  "order_id": str(order_id)}
 
                                 for attempt in range(max_retries):
                                     time.sleep(2)
+                                    # POST 请求，参数在 URL 中，Body 为空字符串
                                     res_detail = self.session.post("https://search.azbbzzc.com/xyUnifyB",
                                                                    params=detail_params, data="", headers=req_headers)
                                     detail_json = res_detail.json()
@@ -235,13 +250,12 @@ class QueryApp:
                                         if details:
                                             for code, val in details.items():
                                                 if code in FIELD_MAP: row_data[FIELD_MAP[code]] = val
-                                            self.log(f"{name} 详情数据拉取并解析成功！")
+                                            self.log(f"{name} 详情数据解析成功！")
                                             break
                                         else:
                                             self.log(f"{name} 报告生成中，等待重试 ({attempt + 1}/{max_retries})...")
                                     else:
-                                        err_msg = detail_json.get('msg', '未知报错')
-                                        self.log(f"{name} 获取详情失败: {err_msg}")
+                                        self.log(f"{name} 详情接口返回异常: {detail_json.get('msg')}")
                                         break
                         else:
                             self.log(f"{name} 核验不一致: {auth_json.get('msg')}")
@@ -249,8 +263,7 @@ class QueryApp:
                             row_data["黑名单核验"] = "-"
                     else:
                         self.log(f"{name} 订单生成失败: {res2.text}")
-                        row_data["核验结果"] = "订单生成失败";
-                        row_data["黑名单核验"] = "-"
+                        row_data["核验结果"] = "订单生成失败"
 
                 except Exception as inner_e:
                     self.log(f"{name} 查询异常: {str(inner_e)}")
@@ -262,11 +275,11 @@ class QueryApp:
 
             output_df = pd.DataFrame(results)
             output_df.to_excel(final_excel, index=False)
-            self.log("--- 任务全部完成！ ---")
-            self.root.after(0, lambda: messagebox.showinfo("完成", f"全部查询顺利完成！\n数据已保存为:\n{final_excel}"))
+            self.log("--- 任务完成！ ---")
+            self.root.after(0, lambda: messagebox.showinfo("完成", f"任务已完成！\n路径:\n{final_excel}"))
 
         except Exception as e:
-            self.log(f"执行中断，严重错误: {str(e)}")
+            self.log(f"严重错误: {str(e)}")
 
 
 if __name__ == "__main__":
