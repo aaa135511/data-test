@@ -11,7 +11,6 @@ import time
 import os
 import csv
 import re
-import traceback
 from urllib.parse import quote
 from Crypto.Cipher import AES, PKCS1_v1_5
 from Crypto.PublicKey import RSA
@@ -54,8 +53,8 @@ tQIDAQAB
 class QueryApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("API 高速自动化查询工具 (原始日志诊断版)")
-        self.root.geometry("750x650")
+        self.root.title("API 高速自动化查询工具 (无错诊断版)")
+        self.root.geometry("680x600")
         self.session = requests.Session()
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -63,8 +62,8 @@ class QueryApp:
         })
         self.excel_path = tk.StringVar();
         self.export_path = tk.StringVar()
-        self.username = tk.StringVar(value="qq888");
-        self.password = tk.StringVar(value="qq888")
+        self.username = tk.StringVar(value="test");
+        self.password = tk.StringVar(value="bb111")
         self.setup_ui()
 
     def setup_ui(self):
@@ -76,13 +75,13 @@ class QueryApp:
         tk.Entry(frame_login, textvariable=self.password, show="*", width=20).grid(row=0, column=3)
         frame_file = tk.LabelFrame(self.root, text="文件与路径", padx=10, pady=10);
         frame_file.pack(fill="x", padx=10, pady=5)
-        tk.Entry(frame_file, textvariable=self.excel_path, width=55, state="readonly").grid(row=0, column=1)
+        tk.Entry(frame_file, textvariable=self.excel_path, width=45, state="readonly").grid(row=0, column=1)
         tk.Button(frame_file, text="导入Excel", command=self.select_file).grid(row=0, column=2)
-        tk.Entry(frame_file, textvariable=self.export_path, width=55, state="readonly").grid(row=1, column=1)
+        tk.Entry(frame_file, textvariable=self.export_path, width=45, state="readonly").grid(row=1, column=1)
         tk.Button(frame_file, text="选择目录", command=self.select_export_dir).grid(row=1, column=2)
         tk.Button(self.root, text="开始执行任务", bg="green", fg="white", font=("Arial", 12, "bold"),
                   command=self.start_task_thread).pack(pady=10)
-        frame_log = tk.LabelFrame(self.root, text="运行详细日志", padx=10, pady=10);
+        frame_log = tk.LabelFrame(self.root, text="日志", padx=10, pady=10);
         frame_log.pack(fill="both", expand=True, padx=10, pady=5)
         self.log_text = scrolledtext.ScrolledText(frame_log, wrap=tk.WORD);
         self.log_text.pack(fill="both", expand=True)
@@ -103,27 +102,14 @@ class QueryApp:
         if not self.excel_path.get() or not self.export_path.get(): return
         threading.Thread(target=self.run_automation, daemon=True).start()
 
-    def safe_parse_json(self, response, label=""):
-        """安全解析JSON，失败时打印原始报错内容"""
-        try:
-            return response.json()
-        except Exception:
-            self.log(f"!!! {label} 接口返回非JSON格式数据 !!!")
-            self.log(f"状态码: {response.status_code}")
-            self.log(f"服务器原始返回内容: {response.text}")
-            return None
-
     def run_automation(self):
         self.log("开始查询流程...")
         try:
             self.session.get("https://search.azbbzzc.com/login.html")
             login_res = self.session.post("https://search.azbbzzc.com/login",
                                           data={"username": self.username.get(), "password": self.password.get()})
-            login_data = self.safe_parse_json(login_res, "登录")
-            if not login_data: return
-
-            token = login_data.get("token")
-            if not token: return self.log("登录失败：未获取到 token")
+            token = login_res.json().get("token")
+            if not token: return self.log("登录失败")
 
             req_headers = {"token": token, "Content-Type": "application/json"}
             df = pd.read_excel(self.excel_path.get(), dtype=str)
@@ -148,7 +134,6 @@ class QueryApp:
                     {"姓名": name, "身份证号": id_card, "电话号码": phone, "核验结果": "", "黑名单核验": ""})
 
                 try:
-                    # 1. 缓存与下单
                     payload1 = CryptoUtil.encrypt_payload(
                         {"name": name, "idN": id_card, "phone": phone, "apitype": 4, "nickname": "测试", "usr": 7})
                     self.session.post("https://search.azbbzzc.com/htOrderss/checkOne", json=payload1,
@@ -156,15 +141,8 @@ class QueryApp:
 
                     payload2 = CryptoUtil.encrypt_payload(
                         {"name": name, "idN": id_card, "phone": phone, "apitype": 10, "nickname": "测试", "usr": 67})
-                    res2_raw = self.session.post("https://search.azbbzzc.com/htOrderss", json=payload2,
-                                                 headers=req_headers)
-                    res2 = self.safe_parse_json(res2_raw, f"{name} 下单接口")
-
-                    if not res2 or not isinstance(res2, dict):
-                        self.log(f"{name} 流程中断：下单接口返回数据异常");
-                        results.append(row_data);
-                        continue
-
+                    res2 = self.session.post("https://search.azbbzzc.com/htOrderss", json=payload2,
+                                             headers=req_headers).json()
                     order_id = res2.get("id");
                     masked_id = res2.get("idN")
 
@@ -175,71 +153,90 @@ class QueryApp:
                         current_headers = req_headers.copy()
                         current_headers["Referer"] = referer_url
 
-                        # 2. 真实核验
+                        # 真实核验
                         auth_url = f"https://search.azbbzzc.com/auth_895w6q?name={safe_name}&id={safe_id}&type=1&order_id={order_id}"
-                        res_auth_raw = self.session.post(auth_url, headers=current_headers)
-                        res_auth = self.safe_parse_json(res_auth_raw, f"{name} 核验接口")
+                        res_auth = self.session.post(auth_url, headers=current_headers)
+                        auth_json = res_auth.json()
 
-                        if res_auth and str(res_auth.get("code")) == "0":
+                        if str(auth_json.get("code")) == "0":
                             row_data["核验结果"] = "一致";
                             self.log(f"{name} 核验一致")
 
-                            # 3. 逾期拦截
+                            # 逾期查询 (安全提取防止报错)
                             res_over_raw = self.session.post(
                                 f"https://search.azbbzzc.com/htOrderss/checkOverdue/{order_id}", json={},
                                 headers=current_headers)
-                            res_over = self.safe_parse_json(res_over_raw, f"{name} 逾期接口")
-
                             m12 = 0
-                            if res_over and isinstance(res_over, dict):
-                                m12 = res_over.get("data", {}).get("data", {}).get("markM12Count", 0)
+                            try:
+                                over_json = res_over_raw.json()
+                                d1 = over_json.get("data")
+                                if isinstance(d1, dict):
+                                    d2 = d1.get("data")
+                                    if isinstance(d2, dict):
+                                        m12 = d2.get("markM12Count", 0)
+                            except:
+                                pass
 
                             if m12 != 0:
                                 row_data["黑名单核验"] = "命中";
-                                self.log(f"{name} 黑名单拦截 (markM12Count={m12})")
+                                self.log(f"{name} 黑名单拦截")
                             else:
                                 row_data["黑名单核验"] = "未命中"
+                                self.log(f"{name} 逾期未命中，触发小雷达...")
                                 self.session.post("https://search.azbbzzc.com/htOrderss/checkTwo",
                                                   json={"apiTpye": 15, "order_id": str(order_id)},
                                                   headers=current_headers)
 
-                                # 4. 轮询详情
-                                for i in range(5):
-                                    time.sleep(2.5)
+                                # 小雷达详情轮询
+                                for attempt in range(5):
+                                    time.sleep(2)
                                     detail_url = f"https://search.azbbzzc.com/xyUnifyB?name={safe_name}&id={safe_id}&phone={phone}&type=1&order_id={order_id}"
-                                    res_det_raw = self.session.post(detail_url, headers=current_headers)
-                                    res_det = self.safe_parse_json(res_det_raw, f"{name} 详情接口重试{i + 1}")
+                                    res_det = self.session.post(detail_url, headers=current_headers)
 
-                                    if res_det and isinstance(res_det, dict):
-                                        details = res_det.get("data", {}).get("result_detail")
-                                        if details:
-                                            for c, v in details.items():
-                                                if c in FIELD_MAP: row_data[FIELD_MAP[c]] = v
-                                            self.log(f"{name} 详情获取成功");
-                                            break
+                                    try:
+                                        res_det_json = res_det.json()
+                                    except Exception:
+                                        self.log(f"【底层原始返回】详情接口未返回JSON格式: {res_det.text}")
+                                        break
+
+                                    if str(res_det_json.get("code")) == "0":
+                                        data_obj = res_det_json.get("data")
+
+                                        # 【防弹解析】严格判断返回的数据结构是不是字典
+                                        if isinstance(data_obj, dict):
+                                            details = data_obj.get("result_detail")
+                                            if isinstance(details, dict):
+                                                for c, v in details.items():
+                                                    if c in FIELD_MAP: row_data[FIELD_MAP[c]] = v
+                                                self.log(f"{name} 详情获取成功")
+                                                break
+                                            else:
+                                                self.log(f"{name} 报告生成中... ({attempt + 1}/5)")
                                         else:
-                                            self.log(f"{name} 报告生成中，等待重试...");
+                                            self.log(f"【底层原始返回】拉取成功但数据异常: {res_det.text}")
+                                            break
                                     else:
+                                        self.log(f"【底层原始返回】拉取详情报错: {res_det.text}")
                                         break
                         else:
-                            msg = res_auth.get('msg') if res_auth else "接口返回内容无法解析"
                             row_data["核验结果"] = "不一致";
-                            self.log(f"{name} 不一致: {msg}")
+                            self.log(f"{name} 不一致: {auth_json.get('msg')}")
                     else:
-                        self.log(f"{name} 订单生成失败 (缺少ID或打码ID)")
+                        self.log(f"{name} 订单失败")
                 except Exception as e:
-                    self.log(f"处理 {name} 时发生程序异常: {str(e)}")
-                    self.log(f"异常堆栈详情:\n{traceback.format_exc()}")
+                    import traceback
+                    self.log(f"内部异常: {str(e)}")
+                    # 如果需要极度详细的错误位置，可以把下面这行注释打开：
+                    # self.log(traceback.format_exc())
 
                 results.append(row_data);
-                time.sleep(1.5)
+                time.sleep(2)
 
             pd.DataFrame(results).to_excel(final_excel, index=False)
-            self.log("任务全部完成");
+            self.log("任务完成");
             messagebox.showinfo("完成", f"已导出至: {final_excel}")
         except Exception as e:
-            self.log(f"全局严重错误: {e}")
-            self.log(traceback.format_exc())
+            self.log(f"严重错误: {e}")
 
 
 if __name__ == "__main__":
