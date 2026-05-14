@@ -130,6 +130,167 @@ class QueryApp:
         except Exception:
             pass
 
+    def run_automation(self):
+        self.log("开始初始化 API 客户端...")
+        try:
+            self.session.get("https://search.azbbzzc.com/login.html")
+            login_res = self.session.post("https://search.azbbzzc.com/login",
+                                          data={"username": self.username.get(), "password": self.password.get()})
+            token = login_res.json().get("token")
+            if not token:
+                self.log("登录失败，未能获取到 Token。")
+                return
+            self.log("登录成功！准备开始批量查询...")
+
+            # 伪装完整的请求头，增强兼容性
+            req_headers = {
+                "token": token,
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+
+            df = pd.read_excel(self.excel_path.get(), dtype=str)
+
+            # --- 精简且精准的客户表头 ---
+            headers_list = [
+                "姓名", "身份证号", "电话号码", "核验结果", "黑名单核验",
+                "近1个月贷款笔数", "近3个月贷款笔数", "近6个月贷款笔数", "近12个月贷款笔数", "近24个月贷款笔数",
+                "近1个月贷款总金额", "近3个月贷款总金额", "近6个月贷款总金额", "近12个月贷款总金额", "近24个月贷款总金额"
+            ]
+
+            timestamp = int(time.time())
+            export_dir = self.export_path.get()
+            backup_csv = os.path.join(export_dir, f"查询结果_实时备份_{timestamp}.csv")
+            final_excel = os.path.join(export_dir, f"查询结果导出_{timestamp}.xlsx")
+
+            with open(backup_csv, mode='w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.DictWriter(f, fieldnames=headers_list)
+                writer.writeheader()
+
+            results = []
+
+            for index, row in df.iterrows():
+                # 数据严格清理
+                name = str(row.get('姓名', '')).strip()
+                id_card = re.sub(r'[^a-zA-Z0-9]', '', str(row.get('身份证', row.get('身份证号', '')))).upper()
+                phone = str(row.get('电话号码', '13888888888')).strip()
+                if phone == 'nan' or not phone: phone = '13888888888'
+                if phone.endswith('.0'): phone = phone[:-2]
+
+                self.log(f"--- 正在处理: {name} (身份证: {id_card[:6]}****{id_card[-4:]}) ---")
+
+                # 初始化默认值 "-"
+                row_data = {key: "-" for key in headers_list}
+                row_data["姓名"] = name
+                row_data["身份证号"] = id_card
+                row_data["电话号码"] = phone
+                row_data["核验结果"] = ""
+                row_data["黑名单核验"] = ""
+
+                try:
+                    # 1. 占位查询缓存
+                    payload1 = CryptoUtil.encrypt_payload({"name": name, "idN": id_card, "phone": phone, "apitype": 4,
+                                                           "nickname": "济南默默电子商务有限公司", "usr": 7})
+                    self.session.post("https://search.azbbzzc.com/htOrderss/checkOne", json=payload1,
+                                      headers=req_headers)
+
+                    # 2. 生成计费订单
+                    payload2 = CryptoUtil.encrypt_payload(
+                        {"name": name, "idN": id_card, "phone": phone, "apitype": "10", "nickname": "测试手机租赁",
+                         "usr": 67})
+                    res2 = self.session.post("https://search.azbbzzc.com/htOrderss", json=payload2, headers=req_headers)
+
+                    order_id = res2.json().get("id") if res2.status_code == 200 else None
+
+                    if order_id:
+                        self.log(f"{name} 计费订单生成成功 (ID: {order_id})")
+
+                        # 3. 真实二要素核验
+                        auth_params = {"name": name, "id": id_card, "type": 1, "order_id": str(order_id)}
+                        res_auth = self.session.post("https://search.azbbzzc.com/auth_895w6q", params=auth_params,
+                                                     headers=req_headers)
+                        auth_json = res_auth.json()
+
+                        if str(auth_json.get("code")) == "0":
+                            self.log(f"{name} 真实核验结果：一致。正在查询逾期...")
+                            row_data["核验结果"] = "一致"
+
+                            # 4. 查询逾期与拦截
+                            overdue_url = f"https://search.azbbzzc.com/htOrderss/checkOverdue/{order_id}"
+                            res_overdue = self.session.post(overdue_url, json={}, headers=req_headers)
+
+                            mark_m12_count = 0
+                            try:
+                                mark_m12_count = res_overdue.json().get("data", {}).get("data", {}).get("markM12Count",
+                                                                                                        0)
+                            except Exception:
+                                pass
+
+                            if mark_m12_count != 0:
+                                row_data["黑名单核验"] = "命中"
+                                self.log(f"{name} 逾期命中，跳过小雷达查询。")
+                            else:
+                                row_data["黑名单核验"] = "未命中"
+                                self.log(f"{name} 逾期未命中，触发小雷达A版...")
+
+                                # 5. 触发小雷达
+                                payload_check2 = {"apiTpye": 15, "order_id": str(order_id)}
+                                self.session.post("https://search.azbbzzc.com/htOrderss/checkTwo", json=payload_check2,
+                                                  headers=req_headers)
+
+                                # 6. 智能轮询获取详情 (防止拉取时报告还未生成)
+                                max_retries = 5
+                                detail_params = {"name": name, "id": id_card, "phone": phone, "type": 1,
+                                                 "order_id": str(order_id)}
+
+                                for attempt in range(max_retries):
+                                    time.sleep(2)  # 给第三方接口生成报告的时间
+                                    res_detail = self.session.post("https://search.azbbzzc.com/xyUnifyB",
+                                                                   params=detail_params, headers=req_headers)
+                                    detail_json = res_detail.json()
+
+                                    if str(detail_json.get("code")) == "0":
+                                        details = detail_json.get("data", {}).get("result_detail")
+                                        if details:  # 成功拿到结果
+                                            for code, val in details.items():
+                                                if code in FIELD_MAP:
+                                                    row_data[FIELD_MAP[code]] = val
+                                            self.log(f"{name} 详情数据拉取并解析成功！")
+                                            break
+                                        else:
+                                            self.log(f"{name} 报告生成中，正在重试 ({attempt + 1}/{max_retries})...")
+                                    else:
+                                        self.log(f"{name} 获取详情失败: {detail_json.get('msg')}")
+                                        break
+                        else:
+                            self.log(f"{name} 核验不一致: {auth_json.get('msg')}")
+                            row_data["核验结果"] = "不一致"
+                            row_data["黑名单核验"] = "-"
+                    else:
+                        self.log(f"{name} 订单生成失败: {res2.text}")
+                        row_data["核验结果"] = "订单生成失败"
+                        row_data["黑名单核验"] = "-"
+
+                except Exception as inner_e:
+                    self.log(f"{name} 查询异常: {str(inner_e)}")
+                    row_data["核验结果"] = "查询异常"
+
+                # 保存记录
+                results.append(row_data)
+                self.save_to_csv_realtime(row_data, backup_csv, headers_list)
+
+                # 防刷频间隔
+                time.sleep(random.uniform(1.5, 2.5))
+
+            # --- 导出 ---
+            output_df = pd.DataFrame(results)
+            output_df.to_excel(final_excel, index=False)
+            self.log("--- 任务全部完成！ ---")
+            self.root.after(0, lambda: messagebox.showinfo("完成", f"全部查询顺利完成！\n数据已保存为:\n{final_excel}"))
+
+        except Exception as e:
+            self.log(f"执行中断，严重错误: {str(e)}")
+            self.root.after(0, lambda: messagebox.showerror("错误", f"程序未能执行到底:\n{str(e)}"))
 
 
 if __name__ == "__main__":
