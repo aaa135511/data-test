@@ -44,16 +44,16 @@ tQIDAQAB
 
     @staticmethod
     def encrypt_payload(data_dict):
-        # 强制 ensure_ascii=True，彻底解决 Win7/Win10 中文版 GBK 编码干扰，保证加密结果全平台一致
-        json_string = json.dumps(data_dict, separators=(',', ':'), ensure_ascii=True).encode('ascii')
-        aes_key = ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(32)).encode('ascii')
+        # 恢复为标准的 ensure_ascii=False 和 utf-8 编码，这是对方服务器唯一能正确解析中文的格式
+        json_string = json.dumps(data_dict, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
+        aes_key = ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(32)).encode('utf-8')
 
         cipher = AES.new(aes_key, AES.MODE_ECB)
-        encrypted_data = base64.b64encode(cipher.encrypt(pad(json_string, AES.block_size))).decode('ascii')
+        encrypted_data = base64.b64encode(cipher.encrypt(pad(json_string, AES.block_size))).decode('utf-8')
 
         rsa_key = RSA.import_key(CryptoUtil.PUBLIC_KEY)
         cipher_rsa = PKCS1_v1_5.new(rsa_key)
-        encrypted_aes_key = base64.b64encode(cipher_rsa.encrypt(aes_key)).decode('ascii')
+        encrypted_aes_key = base64.b64encode(cipher_rsa.encrypt(aes_key)).decode('utf-8')
 
         return {"encryptedKey": encrypted_aes_key, "encryptedData": encrypted_data}
 
@@ -62,7 +62,7 @@ tQIDAQAB
 class QueryApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("API 高速自动化查询工具 (终极版)")
+        self.root.title("API 高速自动化查询工具 (无错交付版)")
         self.root.geometry("680x600")
         self.session = requests.Session()
 
@@ -162,16 +162,17 @@ class QueryApp:
             results = []
 
             for index, row in df.iterrows():
-                # 数据严格清理
+                # 极致数据清理，彻底防止由于 Excel 读取引发的验证失败
                 name = str(row.get('姓名', '')).strip()
                 id_card = re.sub(r'[^a-zA-Z0-9]', '', str(row.get('身份证', row.get('身份证号', '')))).upper()
-                phone = str(row.get('电话号码', '13888888888')).strip()
-                if phone == 'nan' or not phone:
-                    phone = '13888888888'
+
+                phone_raw = str(row.get('电话号码', '13888888888')).strip()
+                if phone_raw.endswith('.0'): phone_raw = phone_raw[:-2]
+                phone = phone_raw if phone_raw != 'nan' and phone_raw else '13888888888'
 
                 self.log(f"--- 正在处理: {name} (身份证: {id_card[:6]}****{id_card[-4:]}) ---")
 
-                # 初始化默认值，接口拿不到的数据默认填 "-"
+                # 初始化默认值
                 row_data = {key: "-" for key in headers_list}
                 row_data["姓名"] = name
                 row_data["身份证号"] = id_card
@@ -230,20 +231,20 @@ class QueryApp:
                                 self.session.post("https://search.azbbzzc.com/htOrderss/checkTwo", json=payload_check2,
                                                   headers=req_headers)
 
-                                # 6. 智能轮询获取详情
+                                # 6. 智能轮询获取详情 (防止拉回来是空数据)
                                 max_retries = 5
                                 detail_params = {"name": name, "id": id_card, "phone": phone, "type": 1,
                                                  "order_id": str(order_id)}
 
                                 for attempt in range(max_retries):
-                                    time.sleep(2)  # 每次等2秒
+                                    time.sleep(2)  # 每次等2秒，等待第三方数据返回
                                     res_detail = self.session.post("https://search.azbbzzc.com/xyUnifyB",
                                                                    params=detail_params, headers=req_headers)
                                     detail_json = res_detail.json()
 
                                     if str(detail_json.get("code")) == "0":
                                         details = detail_json.get("data", {}).get("result_detail")
-                                        if details:  # 报告生成完毕
+                                        if details:  # 只要解析出详情字段，即视为成功
                                             for code, val in details.items():
                                                 if code in FIELD_MAP:
                                                     row_data[FIELD_MAP[code]] = val
@@ -271,7 +272,7 @@ class QueryApp:
                 results.append(row_data)
                 self.save_to_csv_realtime(row_data, backup_csv, headers_list)
 
-                # 防刷频间隔
+                # 防刷频安全间隔
                 time.sleep(random.uniform(1.5, 2.5))
 
             # --- 导出 ---
