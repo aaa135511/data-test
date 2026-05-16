@@ -63,14 +63,14 @@ tQIDAQAB
 class QueryApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("API 高速自动化查询工具 (动态绑定版)")
+        self.root.title("API 高速自动化查询工具 (终极智能适配版)")
         self.root.geometry("680x600")
         self.session = requests.Session()
 
         self.excel_path = tk.StringVar()
         self.export_path = tk.StringVar()
-        self.username = tk.StringVar(value="test")
-        self.password = tk.StringVar(value="bb111")
+        self.username = tk.StringVar(value="dajiba888")
+        self.password = tk.StringVar(value="dajiba888")
 
         self.setup_ui()
 
@@ -140,7 +140,6 @@ class QueryApp:
             if not token:
                 self.log("登录失败，未能获取到 Token。")
                 return
-            self.log("登录成功！正在获取账号专属授权信息...")
 
             req_headers = {
                 "token": token,
@@ -148,35 +147,26 @@ class QueryApp:
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             }
 
-            # 【核心升级】：动态获取当前客户的 usr 和 nickname
+            # 【核心升级】：通过专属接口 /users/current 动态获取当前客户的 usr 和 nickname
             current_usr_id = None
-            current_nickname = "未命名客户"
+            current_nickname = "未知公司"
 
             try:
-                info_res = self.session.get("https://search.azbbzzc.com/getInfo", headers=req_headers)
+                # 加上时间戳防止缓存
+                ts = int(time.time() * 1000)
+                info_res = self.session.get(f"https://search.azbbzzc.com/users/current?_={ts}", headers=req_headers)
                 if info_res.status_code == 200:
                     info_json = info_res.json()
-                    user_info = info_json.get("user", {})
-                    current_usr_id = user_info.get("userId")
-                    current_nickname = user_info.get("nickName") or user_info.get("userName")
-
-                # 如果标准接口没拿到，尝试备用接口
-                if not current_usr_id:
-                    profile_res = self.session.get("https://search.azbbzzc.com/system/user/profile",
-                                                   headers=req_headers)
-                    if profile_res.status_code == 200:
-                        prof_json = profile_res.json()
-                        user_info = prof_json.get("data", {})
-                        current_usr_id = user_info.get("userId")
-                        current_nickname = user_info.get("nickName") or user_info.get("userName")
+                    current_usr_id = info_json.get("id")
+                    current_nickname = info_json.get("nickname") or info_json.get("username")
             except Exception as e:
                 self.log(f"获取账号信息异常: {str(e)}")
 
             if not current_usr_id:
-                self.log("❌ 严重错误：无法自动获取到该账号的 usr 标识！无法继续执行，请联系开发者。")
+                self.log("❌ 严重错误：无法自动获取到该账号的所属信息！")
                 return
 
-            self.log(f"✅ 账号动态绑定成功！[机构名: {current_nickname}, ID: {current_usr_id}]")
+            self.log(f"✅ 账号动态绑定成功！[公司名: {current_nickname}, 内部ID: {current_usr_id}]")
 
             # ----------------------------------------------------
             df = pd.read_excel(self.excel_path.get(), dtype=str)
@@ -199,7 +189,6 @@ class QueryApp:
             results = []
 
             for index, row in df.iterrows():
-                # 数据严格清理
                 name = str(row.get('姓名', '')).strip()
                 id_card = re.sub(r'[^a-zA-Z0-9]', '', str(row.get('身份证', row.get('身份证号', '')))).upper()
                 phone = str(row.get('电话号码', '13888888888')).strip()
@@ -216,7 +205,7 @@ class QueryApp:
                 row_data["黑名单核验"] = ""
 
                 try:
-                    # 【完美绑定】：使用动态获取的 current_nickname 和 current_usr_id
+                    # 【完美绑定】：每次发包都携带自己专属的 nickname 和 usr_id
                     payload1 = CryptoUtil.encrypt_payload(
                         {"name": name, "idN": id_card, "phone": phone, "apitype": 4, "nickname": current_nickname,
                          "usr": current_usr_id})
