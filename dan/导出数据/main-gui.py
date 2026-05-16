@@ -44,8 +44,7 @@ tQIDAQAB
 
     @staticmethod
     def encrypt_payload(data_dict):
-        # 【核心修复】：恢复最标准的 UTF-8 编码，不要转换 ASCII。
-        # 这样上游征信机构接收到的就是原汁原味的中文，绝对不会再报“约束有误/加密方式有误”
+        # 保持原生 UTF-8 编码加密，确保上游接口不乱码，全平台兼容
         json_string = json.dumps(data_dict, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
         aes_key_str = ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(32))
         aes_key = aes_key_str.encode('utf-8')
@@ -64,7 +63,7 @@ tQIDAQAB
 class QueryApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("API 高速自动化查询工具 (无错纯净版)")
+        self.root.title("API 高速自动化查询工具 (动态绑定版)")
         self.root.geometry("680x600")
         self.session = requests.Session()
 
@@ -133,6 +132,7 @@ class QueryApp:
     def run_automation(self):
         self.log("开始初始化 API 客户端...")
         try:
+            # 1. 执行登录
             self.session.get("https://search.azbbzzc.com/login.html")
             login_res = self.session.post("https://search.azbbzzc.com/login",
                                           data={"username": self.username.get(), "password": self.password.get()})
@@ -140,18 +140,47 @@ class QueryApp:
             if not token:
                 self.log("登录失败，未能获取到 Token。")
                 return
-            self.log("登录成功！准备开始批量查询...")
+            self.log("登录成功！正在获取账号专属授权信息...")
 
-            # 伪装完整的请求头，增强兼容性
             req_headers = {
                 "token": token,
                 "Content-Type": "application/json",
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             }
 
+            # 【核心升级】：动态获取当前客户的 usr 和 nickname
+            current_usr_id = None
+            current_nickname = "未命名客户"
+
+            try:
+                info_res = self.session.get("https://search.azbbzzc.com/getInfo", headers=req_headers)
+                if info_res.status_code == 200:
+                    info_json = info_res.json()
+                    user_info = info_json.get("user", {})
+                    current_usr_id = user_info.get("userId")
+                    current_nickname = user_info.get("nickName") or user_info.get("userName")
+
+                # 如果标准接口没拿到，尝试备用接口
+                if not current_usr_id:
+                    profile_res = self.session.get("https://search.azbbzzc.com/system/user/profile",
+                                                   headers=req_headers)
+                    if profile_res.status_code == 200:
+                        prof_json = profile_res.json()
+                        user_info = prof_json.get("data", {})
+                        current_usr_id = user_info.get("userId")
+                        current_nickname = user_info.get("nickName") or user_info.get("userName")
+            except Exception as e:
+                self.log(f"获取账号信息异常: {str(e)}")
+
+            if not current_usr_id:
+                self.log("❌ 严重错误：无法自动获取到该账号的 usr 标识！无法继续执行，请联系开发者。")
+                return
+
+            self.log(f"✅ 账号动态绑定成功！[机构名: {current_nickname}, ID: {current_usr_id}]")
+
+            # ----------------------------------------------------
             df = pd.read_excel(self.excel_path.get(), dtype=str)
 
-            # --- 精简且精准的客户表头 ---
             headers_list = [
                 "姓名", "身份证号", "电话号码", "核验结果", "黑名单核验",
                 "近1个月贷款笔数", "近3个月贷款笔数", "近6个月贷款笔数", "近12个月贷款笔数", "近24个月贷款笔数",
@@ -179,7 +208,6 @@ class QueryApp:
 
                 self.log(f"--- 正在处理: {name} (身份证: {id_card[:6]}****{id_card[-4:]}) ---")
 
-                # 初始化默认值 "-"
                 row_data = {key: "-" for key in headers_list}
                 row_data["姓名"] = name
                 row_data["身份证号"] = id_card
@@ -188,16 +216,16 @@ class QueryApp:
                 row_data["黑名单核验"] = ""
 
                 try:
-                    # 1. 占位查询缓存
-                    payload1 = CryptoUtil.encrypt_payload({"name": name, "idN": id_card, "phone": phone, "apitype": 4,
-                                                           "nickname": "济南默默电子商务有限公司", "usr": 7})
+                    # 【完美绑定】：使用动态获取的 current_nickname 和 current_usr_id
+                    payload1 = CryptoUtil.encrypt_payload(
+                        {"name": name, "idN": id_card, "phone": phone, "apitype": 4, "nickname": current_nickname,
+                         "usr": current_usr_id})
                     self.session.post("https://search.azbbzzc.com/htOrderss/checkOne", json=payload1,
                                       headers=req_headers)
 
-                    # 2. 生成计费订单
                     payload2 = CryptoUtil.encrypt_payload(
-                        {"name": name, "idN": id_card, "phone": phone, "apitype": "10", "nickname": "测试手机租赁",
-                         "usr": 67})
+                        {"name": name, "idN": id_card, "phone": phone, "apitype": "10", "nickname": current_nickname,
+                         "usr": current_usr_id})
                     res2 = self.session.post("https://search.azbbzzc.com/htOrderss", json=payload2, headers=req_headers)
 
                     order_id = res2.json().get("id") if res2.status_code == 200 else None
@@ -205,7 +233,6 @@ class QueryApp:
                     if order_id:
                         self.log(f"{name} 计费订单生成成功 (ID: {order_id})")
 
-                        # 3. 真实二要素核验
                         auth_params = {"name": name, "id": id_card, "type": 1, "order_id": str(order_id)}
                         res_auth = self.session.post("https://search.azbbzzc.com/auth_895w6q", params=auth_params,
                                                      headers=req_headers)
@@ -215,7 +242,6 @@ class QueryApp:
                             self.log(f"{name} 真实核验结果：一致。正在查询逾期...")
                             row_data["核验结果"] = "一致"
 
-                            # 4. 查询逾期与拦截
                             overdue_url = f"https://search.azbbzzc.com/htOrderss/checkOverdue/{order_id}"
                             res_overdue = self.session.post(overdue_url, json={}, headers=req_headers)
 
@@ -233,25 +259,23 @@ class QueryApp:
                                 row_data["黑名单核验"] = "未命中"
                                 self.log(f"{name} 逾期未命中，触发小雷达A版...")
 
-                                # 5. 触发小雷达
                                 payload_check2 = {"apiTpye": 15, "order_id": str(order_id)}
                                 self.session.post("https://search.azbbzzc.com/htOrderss/checkTwo", json=payload_check2,
                                                   headers=req_headers)
 
-                                # 6. 智能轮询获取详情 (防止拉取时报告还未生成)
                                 max_retries = 5
                                 detail_params = {"name": name, "id": id_card, "phone": phone, "type": 1,
                                                  "order_id": str(order_id)}
 
                                 for attempt in range(max_retries):
-                                    time.sleep(2)  # 给第三方接口生成报告的时间
+                                    time.sleep(2)
                                     res_detail = self.session.post("https://search.azbbzzc.com/xyUnifyB",
                                                                    params=detail_params, headers=req_headers)
                                     detail_json = res_detail.json()
 
                                     if str(detail_json.get("code")) == "0":
                                         details = detail_json.get("data", {}).get("result_detail")
-                                        if details:  # 成功拿到结果
+                                        if details:
                                             for code, val in details.items():
                                                 if code in FIELD_MAP:
                                                     row_data[FIELD_MAP[code]] = val
@@ -275,7 +299,6 @@ class QueryApp:
                     self.log(f"{name} 查询异常: {str(inner_e)}")
                     row_data["核验结果"] = "查询异常"
 
-                # 保存记录
                 results.append(row_data)
                 self.save_to_csv_realtime(row_data, backup_csv, headers_list)
 
