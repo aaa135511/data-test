@@ -15,18 +15,20 @@ from Crypto.Cipher import AES, PKCS1_v1_5
 from Crypto.PublicKey import RSA
 from Crypto.Util.Padding import pad
 
-# 字段精准映射表 (JSON编码 -> 客户要求的新表头)
+# ==========================================
+# 字段精准映射表 (核心更新：完全匹配客户截图)
+# ==========================================
 FIELD_MAP = {
-    "B22170002": "近1个月贷款笔数",
-    "B22170003": "近3个月贷款笔数",
-    "B22170004": "近6个月贷款笔数",
-    "B22170005": "近12个月贷款笔数",
-    "B22170006": "近24个月贷款笔数",
-    "B22170007": "近1个月贷款总金额",
-    "B22170008": "近3个月贷款总金额",
-    "B22170009": "近6个月贷款总金额",
-    "B22170010": "近12个月贷款总金额",
-    "B22170011": "近24个月贷款总金额"
+    "B22170036": "近1-3个月失败扣款笔数",  # 对应近3个月数据
+    "B22170041": "近1-3个月履约贷款总金额",  # 对应近3个月数据
+    "B22170046": "近1-3个月履约贷款次数",  # 对应近3个月数据
+    "B22170037": "贷款已结清订单数 （ 不限于24个月结清笔数 ）",
+    "B22170054": "最近一次贷款放款时间",
+    "B22170015": "近 12 个月贷款金额在 1w 以上的笔数",
+    "B22170053": "信用贷款时长",
+    "B22170034": "正常还款订单数占贷款总订单数比例",
+    "B22170050": "最近一次履约距今天数",
+    "B22170045": "近1个月履约贷款次数"  # 对应最右侧列
 }
 
 
@@ -44,7 +46,7 @@ tQIDAQAB
 
     @staticmethod
     def encrypt_payload(data_dict):
-        # 保持原生 UTF-8 编码加密，确保上游接口不乱码，全平台兼容
+        # 原生 UTF-8 编码加密，确保上游接口不乱码，全平台兼容
         json_string = json.dumps(data_dict, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
         aes_key_str = ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(32))
         aes_key = aes_key_str.encode('utf-8')
@@ -63,14 +65,14 @@ tQIDAQAB
 class QueryApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("API 高速自动化查询工具 (终极智能适配版)")
+        self.root.title("API 高速自动化查询工具 (交付终极版)")
         self.root.geometry("680x600")
         self.session = requests.Session()
 
         self.excel_path = tk.StringVar()
         self.export_path = tk.StringVar()
-        self.username = tk.StringVar(value="dajiba888")
-        self.password = tk.StringVar(value="dajiba888")
+        self.username = tk.StringVar(value="test")
+        self.password = tk.StringVar(value="bb111")
 
         self.setup_ui()
 
@@ -138,7 +140,7 @@ class QueryApp:
                                           data={"username": self.username.get(), "password": self.password.get()})
             token = login_res.json().get("token")
             if not token:
-                self.log("登录失败，未能获取到 Token。")
+                self.log("登录失败，未能获取到 Token。请检查账号密码。")
                 return
 
             req_headers = {
@@ -147,12 +149,11 @@ class QueryApp:
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             }
 
-            # 【核心升级】：通过专属接口 /users/current 动态获取当前客户的 usr 和 nickname
+            # 【自动绑定账号】动态获取客户的 usr 和 nickname
             current_usr_id = None
-            current_nickname = "未知公司"
+            current_nickname = "未知客户"
 
             try:
-                # 加上时间戳防止缓存
                 ts = int(time.time() * 1000)
                 info_res = self.session.get(f"https://search.azbbzzc.com/users/current?_={ts}", headers=req_headers)
                 if info_res.status_code == 200:
@@ -163,18 +164,21 @@ class QueryApp:
                 self.log(f"获取账号信息异常: {str(e)}")
 
             if not current_usr_id:
-                self.log("❌ 严重错误：无法自动获取到该账号的所属信息！")
+                self.log("❌ 严重错误：无法自动获取到该账号的绑定信息！")
                 return
 
-            self.log(f"✅ 账号动态绑定成功！[公司名: {current_nickname}, 内部ID: {current_usr_id}]")
+            self.log(f"✅ 账号动态绑定成功！[账户名: {current_nickname}, 内部ID: {current_usr_id}]")
 
             # ----------------------------------------------------
             df = pd.read_excel(self.excel_path.get(), dtype=str)
 
+            # 【全新表头】完全符合客户给出的截图要求
             headers_list = [
                 "姓名", "身份证号", "电话号码", "核验结果", "黑名单核验",
-                "近1个月贷款笔数", "近3个月贷款笔数", "近6个月贷款笔数", "近12个月贷款笔数", "近24个月贷款笔数",
-                "近1个月贷款总金额", "近3个月贷款总金额", "近6个月贷款总金额", "近12个月贷款总金额", "近24个月贷款总金额"
+                "近1-3个月失败扣款笔数", "近1-3个月履约贷款总金额", "近1-3个月履约贷款次数",
+                "贷款已结清订单数 （ 不限于24个月结清笔数 ）", "最近一次贷款放款时间",
+                "近 12 个月贷款金额在 1w 以上的笔数", "信用贷款时长",
+                "正常还款订单数占贷款总订单数比例", "最近一次履约距今天数", "近1个月履约贷款次数"
             ]
 
             timestamp = int(time.time())
@@ -197,6 +201,7 @@ class QueryApp:
 
                 self.log(f"--- 正在处理: {name} (身份证: {id_card[:6]}****{id_card[-4:]}) ---")
 
+                # 初始化默认值 "-"
                 row_data = {key: "-" for key in headers_list}
                 row_data["姓名"] = name
                 row_data["身份证号"] = id_card
@@ -205,13 +210,14 @@ class QueryApp:
                 row_data["黑名单核验"] = ""
 
                 try:
-                    # 【完美绑定】：每次发包都携带自己专属的 nickname 和 usr_id
+                    # 1. 占位查询缓存
                     payload1 = CryptoUtil.encrypt_payload(
                         {"name": name, "idN": id_card, "phone": phone, "apitype": 4, "nickname": current_nickname,
                          "usr": current_usr_id})
                     self.session.post("https://search.azbbzzc.com/htOrderss/checkOne", json=payload1,
                                       headers=req_headers)
 
+                    # 2. 生成计费订单
                     payload2 = CryptoUtil.encrypt_payload(
                         {"name": name, "idN": id_card, "phone": phone, "apitype": "10", "nickname": current_nickname,
                          "usr": current_usr_id})
@@ -222,6 +228,7 @@ class QueryApp:
                     if order_id:
                         self.log(f"{name} 计费订单生成成功 (ID: {order_id})")
 
+                        # 3. 真实二要素核验
                         auth_params = {"name": name, "id": id_card, "type": 1, "order_id": str(order_id)}
                         res_auth = self.session.post("https://search.azbbzzc.com/auth_895w6q", params=auth_params,
                                                      headers=req_headers)
@@ -231,6 +238,7 @@ class QueryApp:
                             self.log(f"{name} 真实核验结果：一致。正在查询逾期...")
                             row_data["核验结果"] = "一致"
 
+                            # 4. 查询逾期与拦截
                             overdue_url = f"https://search.azbbzzc.com/htOrderss/checkOverdue/{order_id}"
                             res_overdue = self.session.post(overdue_url, json={}, headers=req_headers)
 
@@ -248,16 +256,18 @@ class QueryApp:
                                 row_data["黑名单核验"] = "未命中"
                                 self.log(f"{name} 逾期未命中，触发小雷达A版...")
 
+                                # 5. 触发小雷达
                                 payload_check2 = {"apiTpye": 15, "order_id": str(order_id)}
                                 self.session.post("https://search.azbbzzc.com/htOrderss/checkTwo", json=payload_check2,
                                                   headers=req_headers)
 
+                                # 6. 智能轮询获取详情
                                 max_retries = 5
                                 detail_params = {"name": name, "id": id_card, "phone": phone, "type": 1,
                                                  "order_id": str(order_id)}
 
                                 for attempt in range(max_retries):
-                                    time.sleep(2)
+                                    time.sleep(2)  # 每次拉取前休息2秒，给系统生成报告的时间
                                     res_detail = self.session.post("https://search.azbbzzc.com/xyUnifyB",
                                                                    params=detail_params, headers=req_headers)
                                     detail_json = res_detail.json()
@@ -265,6 +275,7 @@ class QueryApp:
                                     if str(detail_json.get("code")) == "0":
                                         details = detail_json.get("data", {}).get("result_detail")
                                         if details:
+                                            # 解析并填充 Excel 数据
                                             for code, val in details.items():
                                                 if code in FIELD_MAP:
                                                     row_data[FIELD_MAP[code]] = val
@@ -288,13 +299,14 @@ class QueryApp:
                     self.log(f"{name} 查询异常: {str(inner_e)}")
                     row_data["核验结果"] = "查询异常"
 
+                # 保存到结果集，并追加写入 CSV 备份
                 results.append(row_data)
                 self.save_to_csv_realtime(row_data, backup_csv, headers_list)
 
-                # 防刷频间隔
+                # 防刷频安全间隔
                 time.sleep(random.uniform(1.5, 2.5))
 
-            # --- 导出 ---
+            # --- 导出最终结果 ---
             output_df = pd.DataFrame(results)
             output_df.to_excel(final_excel, index=False)
             self.log("--- 任务全部完成！ ---")
