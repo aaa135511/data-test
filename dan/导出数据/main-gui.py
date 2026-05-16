@@ -16,19 +16,22 @@ from Crypto.PublicKey import RSA
 from Crypto.Util.Padding import pad
 
 # ==========================================
-# 字段精准映射表 (核心更新：完全匹配客户截图)
+# 字段精准映射表 (完美匹配客户交付表头)
 # ==========================================
 FIELD_MAP = {
-    "B22170036": "近1-3个月失败扣款笔数",  # 对应近3个月数据
-    "B22170041": "近1-3个月履约贷款总金额",  # 对应近3个月数据
-    "B22170046": "近1-3个月履约贷款次数",  # 对应近3个月数据
-    "B22170037": "贷款已结清订单数 （ 不限于24个月结清笔数 ）",
+    "B22170035": "近1个月失败扣款笔数",
+    "B22170045": "近1个月履约贷款次数",
+    "B22170040": "近1个月履约贷款总金额",
+    # M0/M1在近1和近3个月接口本身无数据，代码将自动填入 "-"
+    "B22170036": "近3个月失败扣款笔数",
+    "B22170046": "近3个月履约贷款次数",
+    "B22170041": "近3个月履约贷款总金额",
+    "B22170052": "贷款已结清订单数 （ 不限于24个月结清笔数 ）",
     "B22170054": "最近一次贷款放款时间",
     "B22170015": "近 12 个月贷款金额在 1w 以上的笔数",
     "B22170053": "信用贷款时长",
     "B22170034": "正常还款订单数占贷款总订单数比例",
-    "B22170050": "最近一次履约距今天数",
-    "B22170045": "近1个月履约贷款次数"  # 对应最右侧列
+    "B22170050": "最近一次履约距今天数"
 }
 
 
@@ -46,7 +49,7 @@ tQIDAQAB
 
     @staticmethod
     def encrypt_payload(data_dict):
-        # 原生 UTF-8 编码加密，确保上游接口不乱码，全平台兼容
+        # 强制原生 UTF-8 编码加密，解决 Win7/Win10 编码异常
         json_string = json.dumps(data_dict, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
         aes_key_str = ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(32))
         aes_key = aes_key_str.encode('utf-8')
@@ -134,7 +137,7 @@ class QueryApp:
     def run_automation(self):
         self.log("开始初始化 API 客户端...")
         try:
-            # 1. 执行登录
+            # 1. 登录
             self.session.get("https://search.azbbzzc.com/login.html")
             login_res = self.session.post("https://search.azbbzzc.com/login",
                                           data={"username": self.username.get(), "password": self.password.get()})
@@ -149,7 +152,7 @@ class QueryApp:
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             }
 
-            # 【自动绑定账号】动态获取客户的 usr 和 nickname
+            # 2. 动态获取客户的专属 usr 和 nickname，防止越权拦截
             current_usr_id = None
             current_nickname = "未知客户"
 
@@ -169,16 +172,20 @@ class QueryApp:
 
             self.log(f"✅ 账号动态绑定成功！[账户名: {current_nickname}, 内部ID: {current_usr_id}]")
 
-            # ----------------------------------------------------
             df = pd.read_excel(self.excel_path.get(), dtype=str)
 
-            # 【全新表头】完全符合客户给出的截图要求
+            # ==========================================
+            # 【全新表头】完全符合客户最新截图要求
+            # ==========================================
             headers_list = [
                 "姓名", "身份证号", "电话号码", "核验结果", "黑名单核验",
-                "近1-3个月失败扣款笔数", "近1-3个月履约贷款总金额", "近1-3个月履约贷款次数",
+                "近1个月失败扣款笔数", "近1个月履约贷款次数", "近1个月履约贷款总金额",
+                "近1个月M0+逾期贷款笔数", "近1个月M1+逾期贷款笔数",
+                "近3个月失败扣款笔数", "近3个月履约贷款次数", "近3个月履约贷款总金额",
+                "近3个月M0+逾期贷款笔数", "近3个月M1+逾期贷款笔数",
                 "贷款已结清订单数 （ 不限于24个月结清笔数 ）", "最近一次贷款放款时间",
                 "近 12 个月贷款金额在 1w 以上的笔数", "信用贷款时长",
-                "正常还款订单数占贷款总订单数比例", "最近一次履约距今天数", "近1个月履约贷款次数"
+                "正常还款订单数占贷款总订单数比例", "最近一次履约距今天数"
             ]
 
             timestamp = int(time.time())
@@ -201,7 +208,7 @@ class QueryApp:
 
                 self.log(f"--- 正在处理: {name} (身份证: {id_card[:6]}****{id_card[-4:]}) ---")
 
-                # 初始化默认值 "-"
+                # 【高亮】先给所有列默认填 "-"，如果接口没传回来的字段（如逾期），自然就是 "-"
                 row_data = {key: "-" for key in headers_list}
                 row_data["姓名"] = name
                 row_data["身份证号"] = id_card
@@ -210,14 +217,12 @@ class QueryApp:
                 row_data["黑名单核验"] = ""
 
                 try:
-                    # 1. 占位查询缓存
                     payload1 = CryptoUtil.encrypt_payload(
                         {"name": name, "idN": id_card, "phone": phone, "apitype": 4, "nickname": current_nickname,
                          "usr": current_usr_id})
                     self.session.post("https://search.azbbzzc.com/htOrderss/checkOne", json=payload1,
                                       headers=req_headers)
 
-                    # 2. 生成计费订单
                     payload2 = CryptoUtil.encrypt_payload(
                         {"name": name, "idN": id_card, "phone": phone, "apitype": "10", "nickname": current_nickname,
                          "usr": current_usr_id})
@@ -228,7 +233,6 @@ class QueryApp:
                     if order_id:
                         self.log(f"{name} 计费订单生成成功 (ID: {order_id})")
 
-                        # 3. 真实二要素核验
                         auth_params = {"name": name, "id": id_card, "type": 1, "order_id": str(order_id)}
                         res_auth = self.session.post("https://search.azbbzzc.com/auth_895w6q", params=auth_params,
                                                      headers=req_headers)
@@ -238,7 +242,6 @@ class QueryApp:
                             self.log(f"{name} 真实核验结果：一致。正在查询逾期...")
                             row_data["核验结果"] = "一致"
 
-                            # 4. 查询逾期与拦截
                             overdue_url = f"https://search.azbbzzc.com/htOrderss/checkOverdue/{order_id}"
                             res_overdue = self.session.post(overdue_url, json={}, headers=req_headers)
 
@@ -256,18 +259,17 @@ class QueryApp:
                                 row_data["黑名单核验"] = "未命中"
                                 self.log(f"{name} 逾期未命中，触发小雷达A版...")
 
-                                # 5. 触发小雷达
                                 payload_check2 = {"apiTpye": 15, "order_id": str(order_id)}
                                 self.session.post("https://search.azbbzzc.com/htOrderss/checkTwo", json=payload_check2,
                                                   headers=req_headers)
 
-                                # 6. 智能轮询获取详情
+                                # 智能轮询获取详情，确保报告充分生成
                                 max_retries = 5
                                 detail_params = {"name": name, "id": id_card, "phone": phone, "type": 1,
                                                  "order_id": str(order_id)}
 
                                 for attempt in range(max_retries):
-                                    time.sleep(2)  # 每次拉取前休息2秒，给系统生成报告的时间
+                                    time.sleep(2)
                                     res_detail = self.session.post("https://search.azbbzzc.com/xyUnifyB",
                                                                    params=detail_params, headers=req_headers)
                                     detail_json = res_detail.json()
