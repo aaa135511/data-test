@@ -68,9 +68,12 @@ tQIDAQAB
 class QueryApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("API 高速自动化查询工具 (防断网优化版)")
+        self.root.title("API 高速自动化查询工具 (终极防重防断版)")
         self.root.geometry("680x600")
         self.session = requests.Session()
+
+        # 任务运行状态锁，防止断网时用户重复点击
+        self.is_running = False
 
         self.excel_path = tk.StringVar()
         self.export_path = tk.StringVar()
@@ -100,8 +103,10 @@ class QueryApp:
                                                                                              pady=5)
         tk.Button(frame_file, text="选择目录", command=self.select_export_dir).grid(row=1, column=2, padx=5, pady=5)
 
-        tk.Button(self.root, text="开始执行任务", bg="green", fg="white", font=("Arial", 12, "bold"),
-                  command=self.start_task_thread).pack(pady=10)
+        # 绑定按钮变量，以便控制其可用状态
+        self.btn_start = tk.Button(self.root, text="开始执行任务", bg="green", fg="white", font=("Arial", 12, "bold"),
+                                   command=self.start_task_thread)
+        self.btn_start.pack(pady=10)
 
         frame_log = tk.LabelFrame(self.root, text="运行日志", padx=10, pady=10)
         frame_log.pack(fill="both", expand=True, padx=10, pady=5)
@@ -121,9 +126,17 @@ class QueryApp:
         if dirpath: self.export_path.set(dirpath)
 
     def start_task_thread(self):
+        if self.is_running:
+            messagebox.showwarning("警告", "当前已有任务正在执行中，请勿重复点击！")
+            return
+
         if not self.excel_path.get() or not self.export_path.get():
             messagebox.showwarning("警告", "请先导入数据源文件并选择导出目录！")
             return
+
+        # 锁定状态并禁用按钮
+        self.is_running = True
+        self.btn_start.config(state=tk.DISABLED, text="任务执行中...")
         threading.Thread(target=self.run_automation, daemon=True).start()
 
     def save_to_csv_realtime(self, row_dict, csv_filename, headers_list):
@@ -135,11 +148,11 @@ class QueryApp:
             pass
 
     # ==========================================
-    # 【核心新增】：断网安全挂起请求函数
+    # 断网安全挂起请求函数
     # ==========================================
     def safe_request(self, method, url, **kwargs):
         """带有无限重试机制的网络请求，专门应对断网和网络波动"""
-        kwargs.setdefault('timeout', 15)  # 设置合理的超时时间，防止死锁
+        kwargs.setdefault('timeout', 15)  # 设置合理的超时时间
         while True:
             try:
                 if method.upper() == 'GET':
@@ -147,7 +160,6 @@ class QueryApp:
                 elif method.upper() == 'POST':
                     return self.session.post(url, **kwargs)
             except requests.exceptions.RequestException as e:
-                # 捕获所有网络层面的异常（断网、超时、DNS解析失败等）
                 self.log(f"⚠️ [网络异常] 失去连接，程序已自动挂起等待网络恢复... (5秒后重试)")
                 time.sleep(5)
 
@@ -280,7 +292,7 @@ class QueryApp:
                                 self.safe_request("POST", "https://search.azbbzzc.com/htOrderss/checkTwo",
                                                   json=payload_check2, headers=req_headers)
 
-                                # 【极速单次拉取】：去掉了 5 次重试，只等待 2 秒拉取一次
+                                # 【极速单次拉取】不再无脑轮询，等待2秒拿数据，没有就是没有
                                 time.sleep(2)
                                 detail_params = {"name": name, "id": id_card, "phone": phone, "type": 1,
                                                  "order_id": str(order_id)}
@@ -296,7 +308,6 @@ class QueryApp:
                                                 row_data[FIELD_MAP[code]] = val
                                         self.log(f"{name} 详情数据拉取并解析成功！")
                                     else:
-                                        # 数据确认为空，不重试，直接判定无数据
                                         self.log(f"{name} 查询无数据（该用户无相关雷达记录）。")
                                 else:
                                     self.log(f"{name} 获取详情失败: {detail_json.get('msg')}")
@@ -310,8 +321,7 @@ class QueryApp:
                         row_data["黑名单核验"] = "-"
 
                 except Exception as inner_e:
-                    # 这边的 exception 仅处理 JSON 解析失败、字典不存在等代码级报错
-                    # 断网类异常已在 safe_request 中无限拦截，不会抛到这里导致跳过
+                    # 仅处理非网络的内部代码报错
                     self.log(f"{name} 数据处理异常: {str(inner_e)}")
                     row_data["核验结果"] = "查询异常"
 
@@ -331,6 +341,11 @@ class QueryApp:
         except Exception as e:
             self.log(f"执行中断，严重错误: {str(e)}")
             self.root.after(0, lambda: messagebox.showerror("错误", f"程序未能执行到底:\n{str(e)}"))
+
+        finally:
+            # 【核心逻辑】：无论任务成功、报错还是中断，最后务必解锁并恢复按钮状态！
+            self.is_running = False
+            self.root.after(0, lambda: self.btn_start.config(state=tk.NORMAL, text="开始执行任务"))
 
 
 if __name__ == "__main__":
