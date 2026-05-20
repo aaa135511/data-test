@@ -1,225 +1,167 @@
 //+------------------------------------------------------------------+
-//|                               DoubleDragon_Power_V5_Precision.mq5|
-//|                                  核心：突破200/OCO/3min/极速追踪/盈利加仓|
-//|                             修复说明：强化价格精度规范化，匹配实盘3位小数要求|
+//|                                     DoubleDragon_Final_Fix.mq5   |
+//|                                核心任务：突破200/OCO/3min/追踪/加仓      |
+//|                             修复：解决实盘/模拟盘价格精度拒绝问题          |
 //+------------------------------------------------------------------+
 #property copyright "Expert"
-#property link      "https://m.jrjr.com/"
-#property version   "5.01"
 #property strict
 
 #include <Trade\Trade.mqh>
 
-//--- 基础参数
-input double LotSize         = 0.1;       // 基础首单手数
+//--- 输入参数
+input double LotSize         = 0.1;       // 首单手数
 input double AddLotSize      = 0.1;       // 盈利加仓手数
-input int    Slippage        = 10;        // 滑点 (10点 = 0.1美元)
-input int    MagicNumber     = 888888;    // EA识别码
-input double DailyMaxLoss    = 300.0;     // 核心任务4：日亏损关机 (美元)
-
-//--- 交易价格区间
-input double PriceMin        = 4000.0;    // 交易区间底价
-input double PriceMax        = 6000.0;    // 交易区间顶价
-
-//--- 进场参数
-input int    DistancePoints  = 200;       // 核心任务1：挂单距离 (200点 = 2.0美元)
-
-//--- 追踪与止损参数
+input int    DistancePoints  = 200;       // 挂单距离 (2.0美元)
 input int    InitialStopLoss = 10;        // 初始止损 (10点 = 0.1美元)
-input int    TrailingStart   = 5;         // 获利 5 点激活追踪并触发加仓
-input int    TrailingStop    = 2;         // 追踪回撤距离 (2点 = 0.02美元)
-input int    TimeLimitMin    = 3;         // 核心任务3：持仓时间限制 (分钟)
+input int    TrailingStart   = 5;         // 获利 5 点激活追踪与加仓
+input int    TrailingStop    = 2;         // 追踪回撤 2 点
+input int    TimeLimitMin    = 3;         // 3分钟强平
+input double DailyMaxLoss    = 300.0;     // 日损 300 自动关机
+input int    MagicNumber     = 888888;
 
 //--- 全局变量
 CTrade trade;
 datetime DayStartTime;
 double   InitialBalance;
-bool     IsScaledIn = false; // 标记本轮交易是否已经加过仓
+bool     IsScaledIn = false;
 
-//+------------------------------------------------------------------+
-//| 初始化                                                            |
 //+------------------------------------------------------------------+
 int OnInit()
 {
     trade.SetExpertMagicNumber(MagicNumber);
-    trade.SetDeviationInPoints(Slippage);
+    trade.SetDeviationInPoints(10);
 
+    // 初始化当日数据
     DayStartTime = iTime(_Symbol, PERIOD_D1, 0);
     InitialBalance = AccountInfoDouble(ACCOUNT_BALANCE);
 
-    Print("--- EA Power V5 实盘修复版 已启动 ---");
-    Print("当前品种精度: ", _Digits, " 位小数");
+    Print("EA 已加载。当前品种小数位: ", _Digits);
     return(INIT_SUCCEEDED);
 }
 
 //+------------------------------------------------------------------+
-//| 主循环 (24小时)                                                   |
-//+------------------------------------------------------------------+
 void OnTick()
 {
-    // 1. 核心任务4：日损检查
-    if(!CheckDailyLoss()) return;
+    // 1. 核心任务4：日损检查 (防止 InitialBalance 计算错误导致误关机)
+    if(InitialBalance <= 0) InitialBalance = AccountInfoDouble(ACCOUNT_BALANCE);
 
-    // 2. 价格区间检查
-    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-    if(bid < PriceMin || bid > PriceMax) return;
+    double currentEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+    if((InitialBalance - currentEquity) >= DailyMaxLoss && DailyMaxLoss > 0)
+    {
+        Print("🛑 达到日损限制，执行清理并关机。");
+        CloseAll();
+        ExpertRemove();
+        return;
+    }
 
-    // 3. 核心管理：持仓管理（含加仓判断、时间止损、追踪止盈）
-    HandlePositionsLogic();
+    // 2. 核心管理：追踪、加仓、时间止损
+    ManagePositions();
 
-    // 4. 核心任务1 & 2：挂单逻辑
+    // 3. 核心任务1 & 2：挂单与 OCO
     ManageOrders();
 }
 
 //+------------------------------------------------------------------+
-//| 核心任务4：日损 300 自动关机                                        |
-//+------------------------------------------------------------------+
-bool CheckDailyLoss()
-{
-    if(iTime(_Symbol, PERIOD_D1, 0) != DayStartTime)
-    {
-        DayStartTime = iTime(_Symbol, PERIOD_D1, 0);
-        InitialBalance = AccountInfoDouble(ACCOUNT_BALANCE);
-    }
-    double currentLoss = InitialBalance - AccountInfoDouble(ACCOUNT_EQUITY);
-    if(currentLoss >= DailyMaxLoss)
-    {
-        Print("🛑 触发日损熔断！执行关机。");
-        CloseAllPositions();
-        CancelAllOrders();
-        ExpertRemove();
-        return false;
-    }
-    return true;
-}
-
-//+------------------------------------------------------------------+
-//| 持仓综合管理 (含加仓、时间止损、极速追踪)                            |
-//+------------------------------------------------------------------+
-void HandlePositionsLogic()
+void ManagePositions()
 {
     double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
     double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-    double point = _Point;
-    int positionsCount = 0;
+    int posCount = 0;
 
+    // 遍历持仓
     for(int i=PositionsTotal()-1; i>=0; i--)
     {
         ulong ticket = PositionGetTicket(i);
-        if(PositionSelectByTicket(ticket))
+        if(PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_MAGIC) == MagicNumber)
         {
-            if(PositionGetInteger(POSITION_MAGIC) == MagicNumber)
+            posCount++;
+            double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+            double currentSL = PositionGetDouble(POSITION_SL);
+            long type = PositionGetInteger(POSITION_TYPE);
+
+            // A. 3分钟时间强平
+            if(TimeCurrent() - PositionGetInteger(POSITION_TIME) >= TimeLimitMin * 60)
             {
-                positionsCount++;
-                long posType = PositionGetInteger(POSITION_TYPE);
-                double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-                double currentSL = PositionGetDouble(POSITION_SL);
+                trade.PositionClose(ticket);
+                continue;
+            }
 
-                // --- A. 核心任务3：时间止损 ---
-                long openTime = PositionGetInteger(POSITION_TIME);
-                if(TimeCurrent() - openTime >= TimeLimitMin * 60)
+            // B. 获利加仓与追踪
+            double points = (type == POSITION_TYPE_BUY) ? (bid - openPrice) : (openPrice - ask);
+            points /= _Point;
+
+            if(points >= TrailingStart)
+            {
+                // 如果当前只有1单且本轮没加过，执行加仓
+                if(posCount == 1 && !IsScaledIn)
                 {
-                    trade.PositionClose(ticket);
-                    continue;
+                    if(type == POSITION_TYPE_BUY)
+                        trade.Buy(AddLotSize, _Symbol, NormalizePrice(ask), NormalizePrice(bid - InitialStopLoss*_Point), 0, "ScaleIn");
+                    else
+                        trade.Sell(AddLotSize, _Symbol, NormalizePrice(bid), NormalizePrice(ask + InitialStopLoss*_Point), 0, "ScaleIn");
+                    IsScaledIn = true;
                 }
 
-                // --- B. 极速追踪与盈利加仓 ---
-                if(posType == POSITION_TYPE_BUY)
-                {
-                    double profitPoints = (bid - openPrice) / point;
-                    if(profitPoints >= TrailingStart)
-                    {
-                        if(positionsCount == 1 && !IsScaledIn)
-                        {
-                            // 修复：对加仓价格和止损价格进行严格的精度规范化
-                            double buyPrice = NormalizeDouble(ask, _Digits);
-                            double buySL = NormalizeDouble(bid - InitialStopLoss * point, _Digits);
-                            if(trade.Buy(AddLotSize, _Symbol, buyPrice, buySL, 0, "Scale-In"))
-                            {
-                                IsScaledIn = true;
-                            }
-                        }
-                        double newSL = NormalizeDouble(bid - TrailingStop * point, _Digits);
-                        if(newSL > currentSL + point || currentSL == 0)
-                            trade.PositionModify(ticket, newSL, 0);
-                    }
-                }
-                else if(posType == POSITION_TYPE_SELL)
-                {
-                    double profitPoints = (openPrice - ask) / point;
-                    if(profitPoints >= TrailingStart)
-                    {
-                        if(positionsCount == 1 && !IsScaledIn)
-                        {
-                            // 修复：规范化价格
-                            double sellPrice = NormalizeDouble(bid, _Digits);
-                            double sellSL = NormalizeDouble(ask + InitialStopLoss * point, _Digits);
-                            if(trade.Sell(AddLotSize, _Symbol, sellPrice, sellSL, 0, "Scale-In"))
-                            {
-                                IsScaledIn = true;
-                            }
-                        }
-                        double newSL = NormalizeDouble(ask + TrailingStop * point, _Digits);
-                        if(newSL < currentSL - point || currentSL == 0)
-                            trade.PositionModify(ticket, newSL, 0);
-                    }
-                }
+                // 执行追踪止损
+                double newSL = (type == POSITION_TYPE_BUY) ? (bid - TrailingStop*_Point) : (ask + TrailingStop*_Point);
+                newSL = NormalizePrice(newSL);
+
+                if(type == POSITION_TYPE_BUY && (newSL > currentSL + _Point || currentSL == 0))
+                    trade.PositionModify(ticket, newSL, 0);
+                else if(type == POSITION_TYPE_SELL && (newSL < currentSL - _Point || currentSL == 0))
+                    trade.PositionModify(ticket, newSL, 0);
             }
         }
     }
-    if(positionsCount == 0) IsScaledIn = false;
+    if(posCount == 0) IsScaledIn = false;
 }
 
-//+------------------------------------------------------------------+
-//| 核心任务1 & 2：OCO 突破挂单管理                                    |
 //+------------------------------------------------------------------+
 void ManageOrders()
 {
-    int ordersCount = 0;
-    int positionsCount = 0;
-
+    int orders = 0, positions = 0;
     for(int i=PositionsTotal()-1; i>=0; i--)
-        if(PositionSelectByTicket(PositionGetTicket(i)))
-            if(PositionGetInteger(POSITION_MAGIC) == MagicNumber) positionsCount++;
-
+        if(PositionSelectByTicket(PositionGetTicket(i)) && PositionGetInteger(POSITION_MAGIC) == MagicNumber) positions++;
     for(int i=OrdersTotal()-1; i>=0; i--)
-        if(OrderGetInteger(ORDER_MAGIC) == MagicNumber) ordersCount++;
+        if(OrderSelect(OrderGetTicket(i)) && OrderGetInteger(ORDER_MAGIC) == MagicNumber) orders++;
 
-    if(positionsCount > 0)
-    {
-        if(ordersCount > 0) CancelAllOrders();
-        return;
-    }
+    // OCO: 有持仓则删挂单
+    if(positions > 0) { if(orders > 0) CancelOrders(); return; }
 
-    if(positionsCount == 0 && ordersCount == 0)
+    // 挂单
+    if(positions == 0 && orders == 0)
     {
         double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
         double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-        double point = _Point;
 
-        // 修复：对挂单价格、初始止损价格进行严格的精度规范化
-        double buyStopPrice = NormalizeDouble(ask + DistancePoints * point, _Digits);
-        double buyStopSL    = NormalizeDouble(buyStopPrice - InitialStopLoss * point, _Digits);
+        double pBuy = NormalizePrice(ask + DistancePoints * _Point);
+        double pSell = NormalizePrice(bid - DistancePoints * _Point);
 
-        double sellStopPrice = NormalizeDouble(bid - DistancePoints * point, _Digits);
-        double sellStopSL     = NormalizeDouble(sellStopPrice + InitialStopLoss * point, _Digits);
-
-        trade.BuyStop(LotSize, buyStopPrice, _Symbol, buyStopSL, 0, ORDER_TIME_GTC, 0, "Start_Order");
-        trade.SellStop(LotSize, sellStopPrice, _Symbol, sellStopSL, 0, ORDER_TIME_GTC, 0, "Start_Order");
+        trade.BuyStop(LotSize, pBuy, _Symbol, NormalizePrice(pBuy - InitialStopLoss*_Point), 0);
+        trade.SellStop(LotSize, pSell, _Symbol, NormalizePrice(pSell + InitialStopLoss*_Point), 0);
     }
 }
 
-//--- 清理函数
-void CloseAllPositions()
+//--- 价格规范化核心函数 (解决三位小数报错的关键)
+double NormalizePrice(double p)
 {
-    for(int i=PositionsTotal()-1; i>=0; i--)
-        if(PositionSelectByTicket(PositionGetTicket(i)))
-            if(PositionGetInteger(POSITION_MAGIC) == MagicNumber) trade.PositionClose(PositionGetTicket(i));
+    double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+    if(tickSize > 0)
+        return(NormalizeDouble(MathRound(p/tickSize)*tickSize, _Digits));
+    return(NormalizeDouble(p, _Digits));
 }
 
-void CancelAllOrders()
+void CancelOrders()
 {
     for(int i=OrdersTotal()-1; i>=0; i--)
-        if(OrderSelect(OrderGetTicket(i)))
-            if(OrderGetInteger(ORDER_MAGIC) == MagicNumber) trade.OrderDelete(OrderGetTicket(i));
+        if(OrderSelect(OrderGetTicket(i)) && OrderGetInteger(ORDER_MAGIC) == MagicNumber)
+            trade.OrderDelete(OrderGetTicket(i));
+}
+
+void CloseAll()
+{
+    for(int i=PositionsTotal()-1; i>=0; i--)
+        if(PositionSelectByTicket(PositionGetTicket(i)) && PositionGetInteger(POSITION_MAGIC) == MagicNumber)
+            trade.PositionClose(PositionGetTicket(i));
+    CancelOrders();
 }
